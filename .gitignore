@@ -1,0 +1,68 @@
+# Ignore everything at the root unless it belongs to the Android app.
+# Internal instructions, docs, mockups and analysis stay local.
+/*
+!/.gitignore
+!/app/
+!/gradle/
+!/build.gradle.kts
+!/settings.gradle.kts
+!/gradle.properties
+!/gradlew
+!/gradlew.bat
+
+# Allow only app sources/resources and required module configuration.
+/app/*
+!/app/src/
+!/app/build.gradle.kts
+!/app/proguard-rules.pro
+
+# Keep reproducible Gradle wrapper and dependency catalog files.
+/gradle/*
+!/gradle/libs.versions.toml
+!/gradle/wrapper/
+/gradle/wrapper/*
+!/gradle/wrapper/gradle-wrapper.jar
+!/gradle/wrapper/gradle-wrapper.properties
+
+# Credentials and local configuration are excluded at any depth.
+.env
+.env.*
+*.pem
+*.key
+*.keystore
+*.jks
+keystore.properties
+local.properties
+
+# Generated output and diagnostic artifacts
+*.apk
+*.aab
+*.apks
+*.dex
+*.hprof
+*.pcap
+*.pcapng
+*.har
+*.log
+
+.gradle/
+.kotlin/
+**/build/
+.cxx/
+.externalNativeBuild/
+captures/
+
+# Editor, OS and temporary files
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+*.tmp
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/

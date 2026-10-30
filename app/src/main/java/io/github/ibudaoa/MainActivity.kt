@@ -1,0 +1,178 @@
+package io.github.ibudaoa
+
+import android.os.Bundle
+import android.content.Intent
+import android.net.VpnService
+import android.provider.Settings
+import android.view.WindowManager
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import io.github.ibudaoa.capture.CaptureVpnService
+import io.github.ibudaoa.capture.ReadOnlyPolicy
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import io.github.ibudaoa.ui.IbudaoaApp
+import io.github.ibudaoa.ui.IbudaoaTheme
+
+class MainActivity : ComponentActivity() {
+    private val model: AppViewModel by viewModels()
+    private val importConfig = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(model::importConfig)
+    }
+    private val exportConfig = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        uri?.let(model::exportConfig)
+    }
+    private val exportConnectionReport = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        uri?.let(model::exportConnectionReport)
+    }
+    private val exportCertificate = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/x-x509-ca-cert"),
+    ) { uri -> uri?.let(model::exportCertificate) }
+    private val vpnPermission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == RESULT_OK) startCollector()
+        else model.showMessage("未授予 VPN 连接权限，采集未启动。")
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                model.captureActions.collect { action ->
+                    when (action) {
+                        CaptureAction.EXPORT_CERTIFICATE -> exportCertificate.launch("ibudaoa-diagnostics-ca.cer")
+                        CaptureAction.OPEN_SECURITY_SETTINGS -> runCatching {
+                            startActivity(Intent(Settings.ACTION_SECURITY_SETTINGS))
+                        }.onFailure { model.showMessage("请手动打开系统设置，搜索“CA 证书”，安装刚保存的证书。") }
+                        CaptureAction.REQUEST_VPN -> requestVpn()
+                        CaptureAction.OPEN_OFFICIAL -> openOfficial()
+                        CaptureAction.STOP_CAPTURE -> CaptureVpnService.stopOwned(this@MainActivity)
+                    }
+                }
+            }
+        }
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                while (isActive) {
+                    model.refreshRouteDraft()
+                    delay(30_000)
+                }
+            }
+        }
+        setContent {
+            val state by model.state.collectAsStateWithLifecycle()
+            DisposableEffect(state.session.keepScreenOn) {
+                if (state.session.keepScreenOn) {
+                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+                onDispose { window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+            }
+            IbudaoaTheme {
+                IbudaoaApp(
+                    state = state,
+                    events = model.events,
+                    onAcknowledgePreparation = { model.continuePreparation(lifecycle) },
+                    onImport = { importConfig.launch(arrayOf("application/json", "text/plain")) },
+                    onExport = { if(state.automaticRun.blocksExternalUi)model.showMessage("请等待本次执行与记录核对结束后再导出，打开文件选择器会离开前台。") else exportConfig.launch("ibudaoa-diagnostic.json") },
+                    onExportConnectionReport = { if(state.automaticRun.blocksExternalUi)model.showMessage("请等待本次执行与记录核对结束后再导出。") else exportConnectionReport.launch("ibudaoa-connection-report.json") },
+                    onClear = model::clearDiagnostic,
+                    onMessage = model::showMessage,
+                    onMapConsent = model::setMapConsent,
+                    onReconnect = model::continueCapture,
+                    onAccountReadCheck = model::continueAccountSession,
+                    onVerifyAccountSession = model::verifyAccountSession,
+                    onDisconnectAccountSession = model::disconnectAccountSession,
+                    onCheckRoadGaps = { model.checkRoadGaps(lifecycle) },
+                    onSetManualGap = model::setManualGap,
+                    onSetReviewedDirection = model::setReviewedDirection,
+                    onConfirmAllDirections = model::confirmAllReviewedDirections,
+                    onConfirmAllRoadConnections = model::confirmAllRoadConnectionsAndDirections,
+                    onDisplayFix = model::updateDisplayFix,
+                    onLocationDiagnostics = model::updateLocationDiagnostics,
+                    onPrepareLocalPreview = model::prepareLocalPreview,
+                    onPrepareRunningPlan = { model.prepareRunningPlan(lifecycle) },
+                    onAutomaticAction = { model.automaticAction(lifecycle) },
+                    onFinishAutomatic = model::finishAutomatic,
+                    onArchiveAutomatic = model::archiveManuallyReviewedAutomatic,
+                    onCheckUpdates = model::checkUpdates,
+                    onConfirmPreviewOrigin = model::confirmLocalPreviewOrigin,
+                    onClosePreviewReview = model::closeLocalPreviewReview,
+                    onCancelCapture = {
+                        model.cancelCapture()
+                        CaptureVpnService.stopOwned(this)
+                    },
+                )
+            }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        model.onForegroundReturned()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        model.onAutomaticForegroundReturned()
+        model.refreshCertificateStatus()
+        if (io.github.ibudaoa.capture.CaptureReturnPolicy.shouldRelease(io.github.ibudaoa.capture.CaptureRuntime.state.value)) {
+            CaptureVpnService.stopOwned(this)
+        }
+    }
+
+    private fun requestVpn() {
+        if (!model.captureRequested) return
+        try {
+            val intent = VpnService.prepare(this)
+            if (intent == null) startCollector() else vpnPermission.launch(intent)
+        } catch (_: Exception) { model.showMessage("无法请求 VPN 授权，请检查系统设置。") }
+    }
+
+    private fun startCollector() {
+        if (!model.captureRequested) return
+        try {
+            startForegroundService(Intent(this, CaptureVpnService::class.java).setAction(CaptureVpnService.ACTION_START)
+                .putExtra("account_read_check",model.requestedCapturePurpose==io.github.ibudaoa.capture.CapturePurpose.ACCOUNT_READ_CHECK)
+                .putExtra("account_session",model.requestedCapturePurpose==io.github.ibudaoa.capture.CapturePurpose.ACCOUNT_SESSION))
+        } catch (_: Exception) { model.showMessage("系统未允许启动采集，请保持应用前台后重试。") }
+    }
+
+    private fun openOfficial() {
+        if (!model.captureRequested || !model.state.value.capture.active) return
+        val launch = packageManager.getLaunchIntentForPackage(ReadOnlyPolicy.OFFICIAL_PACKAGE)
+        if (launch == null) {
+            CaptureVpnService.stopOwned(this)
+            model.showMessage("未找到步道乐跑，请先安装官方应用并完成登录。")
+            return
+        }
+        try { startActivity(launch); model.markOfficialOpened() }
+        catch (_: Exception) {
+            CaptureVpnService.stopOwned(this)
+            model.showMessage("无法打开官方应用，临时采集已停止。")
+        }
+    }
+
+    override fun onPause() {
+        model.interruptAutomatic()
+        model.cancelRoadCheck()
+        super.onPause()
+    }
+
+    override fun onStop() {
+        if (!isChangingConfigurations) model.onForegroundLost()
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        super.onStop()
+    }
+}

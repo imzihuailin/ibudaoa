@@ -1,0 +1,8 @@
+The passive response framing and AES response protocol in BeforeRunDecoder.kt were
+reimplemented in Kotlin with reference to BAB2007/yuda-run-helper, commit
+fbee94ecfdf88778867423556e100de071a47469 (Apache License 2.0).
+Source: https://github.com/BAB2007/yuda-run-helper
+The public protocol constants are not account credentials. No reference Java
+modules, shared certificate private keys, or permissive TLS verifiers are included.
+See Apache-2.0.txt for the license. Bouncy Castle dependencies retain their own
+licenses: https://www.bouncycastle.org/licensing-support/

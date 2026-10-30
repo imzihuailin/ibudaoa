@@ -1,0 +1,252 @@
+package io.github.ibudaoa.capture
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.net.ProxyInfo
+import android.net.VpnService
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.ParcelFileDescriptor
+import io.github.ibudaoa.MainActivity
+import io.github.ibudaoa.R
+import io.github.ibudaoa.data.DiagnosticStore
+import android.system.Os
+import android.system.OsConstants
+import android.system.StructPollfd
+import android.system.ErrnoException
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.concurrent.thread
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+
+/** Temporary, explicitly user-started config collection. Never a movement/background runner. */
+class CaptureVpnService : VpnService() {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val handler = Handler(Looper.getMainLooper())
+    private val resourceLock = Any()
+    private val captured = AtomicBoolean(false)
+    private var generation = 0L
+    private var sessionTicket=0L
+    private var purpose = CapturePurpose.CONFIG
+    private var tun: ParcelFileDescriptor? = null
+    private var proxy: ReadOnlyProxy? = null
+    private var drainThread:Thread?=null
+    @Volatile private var destroyed = false
+    private val timeout = Runnable {
+        fail(CaptureProblem.TIMEOUT)
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        instance=this
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if(destroyed) { stopSelf();return START_NOT_STICKY }
+        if (intent?.action == ACTION_STOP) {
+            if (intent.getLongExtra("generation", generation) == generation) stopCapture()
+            return START_NOT_STICKY
+        }
+        if (intent?.action != ACTION_START) { stopSelf(); return START_NOT_STICKY }
+        if (generation != 0L) return START_NOT_STICKY
+        purpose=when {
+            intent.getBooleanExtra("account_session",false) -> CapturePurpose.ACCOUNT_SESSION
+            intent.getBooleanExtra("account_read_check",false) -> CapturePurpose.ACCOUNT_READ_CHECK
+            else -> CapturePurpose.CONFIG
+        }
+        running=true
+        if(purpose==CapturePurpose.ACCOUNT_SESSION) sessionTicket=AccountSessionRuntime.session.begin()
+        generation = CaptureRuntime.begin(purpose)
+        try {
+            val notification = notification()
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE)
+            } else startForeground(NOTIFICATION_ID, notification)
+        } catch (_: Exception) { fail(CaptureProblem.VPN); return START_NOT_STICKY }
+        handler.postDelayed(timeout, 120_000)
+        scope.launch { startCollector() }
+        return START_NOT_STICKY
+    }
+
+    private fun startCollector() {
+        try {
+            AccountSessionRuntime.initialize(this)
+            val certificates = CaptureCertificates(this)
+            if (!certificates.isInstalled()) { fail(CaptureProblem.CERTIFICATE); return }
+            val context = certificates.serverContext()
+            val local = ReadOnlyProxy(context, onBeforeRun = onResponse@ { bytes ->
+                if (purpose != CapturePurpose.CONFIG) return@onResponse
+                val safe = try { BeforeRunDecoder.decode(bytes) }
+                catch (e: BeforeRunAccountException) {
+                    CaptureRuntime.update(generation) { it.copy(problem = e.problem, message = e.problem.userMessage) }
+                    return@onResponse
+                }
+                catch (_: Exception) {
+                    CaptureRuntime.update(generation) { it.copy(problem = CaptureProblem.INVALID_RESPONSE,
+                        message = CaptureProblem.INVALID_RESPONSE.userMessage) }
+                    return@onResponse
+                }
+                if (captured.compareAndSet(false, true)) scope.launch {
+                    try {
+                        DiagnosticStore(this@CaptureVpnService).save(safe, captured = true)
+                        CaptureRuntime.update(generation) { it.copy(phase = CapturePhase.CAPTURED,
+                            config = safe, problem = CaptureProblem.NONE, message = "已采集官方跑前配置，返回本应用后关闭临时连接。") }
+                        // Keep filtering while the official app is still visible. The activity
+                        // closes this service on return; the original two-minute deadline remains.
+                    } catch (e: CancellationException) { throw e }
+                    catch (_: Exception) { fail(CaptureProblem.STORAGE) }
+                }
+            }, onAccountProfile = { bytes ->
+                val profile = runCatching { AccountProfileDecoder.decode(bytes) }.getOrNull()
+                if (profile != null) CaptureRuntime.update(generation) { it.copy(profile = profile) }
+            }, accountCheckOnly=purpose!=CapturePurpose.CONFIG, onAccountRead={ result ->
+                if(purpose==CapturePurpose.ACCOUNT_SESSION) AccountSessionRuntime.session.acquisition(sessionTicket,result)
+                val waitingProtocol=purpose==CapturePurpose.ACCOUNT_SESSION && result.readAccepted && !AccountSessionRuntime.session.state.value.protocolReady
+                CaptureRuntime.update(generation) { it.copy(accountRead=result,
+                    phase=if(waitingProtocol)CapturePhase.LISTENING else if (result.readAccepted) CapturePhase.CAPTURED else CapturePhase.ERROR,
+                    problem=if (result.readAccepted) CaptureProblem.NONE else CaptureProblem.ACCOUNT_CHECK,
+                    message=if(waitingProtocol) "账号已读取并保存，请继续在官方进入校园跑准备页，不点击开始，再返回。"
+                        else if (purpose==CapturePurpose.ACCOUNT_SESSION && result.readAccepted)
+                        "已收到账号读取结果；返回本应用后自动核验保存的登录，仍需核对学校配置归属。"
+                        else if (result.outcome==AccountReadOutcome.READ_ACCEPTED_UNBOUND)
+                        "独立只读请求已获服务端成功响应；响应未提供账号标识，归属未核实，未保留会话。请返回本应用导出结果。"
+                        else if (result.outcome==AccountReadOutcome.PASSED)
+                        "独立签名的账号只读请求已通过；未保留可复用会话，请返回本应用导出结果。"
+                        else "账号只读校验未完成，请返回本应用导出结果。") }
+                if (!result.readAccepted) handler.post { stopCapture() }
+            }, onAcceptedAccount=if(purpose==CapturePurpose.ACCOUNT_SESSION) { accepted ->
+                if(!destroyed) AccountSessionRuntime.session.accept(sessionTicket,accepted)
+                Unit
+            } else null, accountMaintenance=purpose==CapturePurpose.ACCOUNT_SESSION,
+                onAccountProtocol={ request,response ->
+                    val context=try { AccountProtocol.capture(request,response) }
+                        catch(e:ProtocolCaptureFailure) { AccountSessionRuntime.session.protocolProblem(sessionTicket,e.problem);null }
+                    if(context!=null) try {
+                        if(!destroyed) AccountSessionRuntime.session.offerProtocol(sessionTicket,context)
+                        val account=AccountSessionRuntime.session.state.value
+                        if(account.protocolReady && account.acquisition?.readAccepted==true) CaptureRuntime.update(generation) {
+                            it.copy(phase=CapturePhase.CAPTURED,problem=CaptureProblem.NONE,
+                                message="账号维护材料已接入，返回后自动核验登录和最新跑前条件。")
+                        }
+                    } finally { context.fill(0) }
+                }, onBlocked = { kind ->
+                CaptureRuntime.update(generation) { it.copy(blockedRequests = it.blockedRequests + 1,
+                    blockedKinds = it.blockedKinds + kind) }
+            }, onProblem = { problem ->
+                CaptureRuntime.update(generation) { it.copy(problem = problem, message = problem.userMessage) }
+            })
+            synchronized(resourceLock) {
+                if (destroyed) { local.close(); return }
+                proxy = local
+                val configure = PendingIntent.getActivity(this, 1, Intent(this, MainActivity::class.java),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                tun = Builder().setSession(if (purpose!=CapturePurpose.CONFIG) "ibudaoa 账号只读校验" else "ibudaoa 只读配置采集")
+                    .addAddress("10.111.0.2", 32).addRoute("0.0.0.0", 0)
+                    .addAllowedApplication(ReadOnlyPolicy.OFFICIAL_PACKAGE)
+                    .setHttpProxy(ProxyInfo.buildDirectProxy("127.0.0.1", local.port))
+                    .setConfigureIntent(configure).setBlocking(false).establish()
+                    ?: error("VPN not established")
+                val descriptor = tun ?: error("VPN not established")
+                drainThread=thread(name = "diagnostic-vpn-drain", isDaemon = true) {
+                    // Bounded poll + nonblocking read: a quiet TUN must never hold shutdown indefinitely.
+                    // Non-proxy official traffic remains blocked while the temporary collector is active.
+                    val buffer=ByteArray(32768)
+                    val poll=StructPollfd().apply { fd=descriptor.fileDescriptor;events=OsConstants.POLLIN.toShort() }
+                    try {
+                        while(!destroyed && descriptor.fileDescriptor.valid()) {
+                            if(Os.poll(arrayOf(poll),250)<=0)continue
+                            if(poll.revents.toInt() and (OsConstants.POLLHUP or OsConstants.POLLERR or OsConstants.POLLNVAL)!=0)break
+                            if(poll.revents.toInt() and OsConstants.POLLIN!=0) {
+                                try { if(Os.read(descriptor.fileDescriptor,buffer,0,buffer.size)<=0)break }
+                                catch(e:ErrnoException) { if(e.errno!=OsConstants.EAGAIN && e.errno!=OsConstants.EINTR)throw e }
+                            }
+                        }
+                    } catch(_:Exception) { /* Closed by the owning service; never establish a replacement. */ }
+                    finally { buffer.fill(0) }
+                }
+            }
+            CaptureRuntime.update(generation) { it.copy(phase = CapturePhase.LISTENING,
+                message = if (purpose!=CapturePurpose.CONFIG)
+                    if(purpose==CapturePurpose.ACCOUNT_SESSION) "请在官方应用先打开“我的”，再进入校园跑准备页后返回；不要点击开始。"
+                    else "请在官方应用打开“我的”页，触发账号资料读取后返回。"
+                    else "请在官方应用进入校园跑准备页，不要点击开始；读到配置后返回这里。") }
+            local.serve()
+        } catch (_: Exception) { if (!destroyed) fail(CaptureProblem.VPN) }
+    }
+
+    private fun fail(problem: CaptureProblem) {
+        CaptureRuntime.update(generation) { it.copy(phase = CapturePhase.ERROR, problem = problem, message = problem.userMessage) }
+        handler.post { stopCapture() }
+    }
+
+    private fun notification(): Notification {
+        getSystemService(NotificationManager::class.java).createNotificationChannel(
+            NotificationChannel(CHANNEL, "临时只读采集", NotificationManager.IMPORTANCE_LOW))
+        val stop = PendingIntent.getService(this, 2,
+            Intent(this, CaptureVpnService::class.java).setAction(ACTION_STOP).putExtra("generation", generation),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val open = PendingIntent.getActivity(this, 1, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        return Notification.Builder(this, CHANNEL).setSmallIcon(R.drawable.ic_launcher)
+            .setContentTitle(if (purpose!=CapturePurpose.CONFIG) "正在只读校验账号" else "正在只读采集学校配置").setContentText("仅限官方应用，两分钟内自动停止，不启动运动。")
+            .setContentIntent(open).setOngoing(true).setCategory(Notification.CATEGORY_SERVICE)
+            .addAction(Notification.Action.Builder(null, "结束采集", stop).build()).build()
+    }
+
+    override fun onRevoke() { fail(CaptureProblem.REVOKED); super.onRevoke() }
+    override fun onTimeout(startId: Int) { fail(CaptureProblem.TIMEOUT) }
+    override fun onTimeout(startId: Int, fgsType: Int) { fail(CaptureProblem.TIMEOUT) }
+    override fun onTaskRemoved(rootIntent: Intent?) { stopCapture() }
+
+    /** Close the owned TUN before account callbacks or proxy cleanup can block. */
+    private fun releaseCapture() {
+        val resources=synchronized(resourceLock) {
+            if(destroyed)return
+            destroyed=true
+            val owned=Triple(tun,proxy,drainThread)
+            tun=null;proxy=null;drainThread=null
+            owned
+        }
+        runCatching { resources.first?.close() }
+        resources.third?.takeIf { it!==Thread.currentThread() }?.let { runCatching { it.join(500) } }
+        running=false
+        handler.removeCallbacksAndMessages(null)
+        scope.cancel()
+        // Socket disconnects can block; the system VPN route has already been removed.
+        thread(name="capture-proxy-cleanup",isDaemon=true) { resources.second?.let { runCatching { it.close() } } }
+        if(sessionTicket!=0L)AccountSessionRuntime.session.captureEnded(sessionTicket)
+        CaptureRuntime.update(generation) { it.copy(phase=CapturePhase.CANCELLED,message="临时采集已结束。",
+            problem=if(it.problem==CaptureProblem.NONE)CaptureProblem.CANCELLED else it.problem) }
+    }
+    private fun stopCapture() { releaseCapture();stopSelf() }
+    override fun onDestroy() {
+        releaseCapture()
+        if(instance===this)instance=null
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        super.onDestroy()
+    }
+
+    companion object {
+        @Volatile private var instance:CaptureVpnService?=null
+        /** Only this app's temporary service; never toggles or rejects another VPN. */
+        fun stopOwned(context:android.content.Context) {
+            instance?.releaseCapture()
+            context.stopService(Intent(context,CaptureVpnService::class.java))
+        }
+        @Volatile var running=false
+            private set
+        const val ACTION_START = "io.github.ibudaoa.capture.START"
+        const val ACTION_STOP = "io.github.ibudaoa.capture.STOP"
+        private const val CHANNEL = "readonly_capture"
+        private const val NOTIFICATION_ID = 40
+    }
+}
