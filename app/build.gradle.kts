@@ -28,12 +28,12 @@ android {
         applicationId = "io.github.ibudaoa"
         minSdk = 29
         targetSdk = 36
-        versionCode = 44
-        versionName = "0.16.0-rc1"
+        versionCode = 55
+        versionName = "0.17.0-debug-control"
         manifestPlaceholders["amapAndroidKey"] = localMapKey
         buildConfigField("boolean", "MAP_KEY_CONFIGURED", localMapKey.isNotEmpty().toString())
         buildConfigField("String", "REPOSITORY_URL", "\"$localRepositoryUrl\"")
-        ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a") }
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
 
     buildFeatures {
@@ -61,7 +61,8 @@ android {
             // First self-use release preserves the existing project-owned private signing identity.
             signingConfig = signingConfigs.getByName("debug")
             isDebuggable = false
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }

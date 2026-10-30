@@ -65,6 +65,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.platform.LocalUriHandler
 import io.github.ibudaoa.maps.CampusMap
 import io.github.ibudaoa.maps.DisplayFix
@@ -99,7 +100,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlinx.coroutines.flow.Flow
 
-private enum class Destination(val label: String, val icon: ImageVector) {
+internal enum class Destination(val label: String, val icon: ImageVector) {
     RUN("跑步", Icons.AutoMirrored.Filled.DirectionsRun),
     SCHOOL("学校", Icons.Default.School),
     SETTINGS("设置", Icons.Default.Settings),
@@ -134,6 +135,7 @@ fun IbudaoaApp(
     onFinishAutomatic: () -> Unit,
     onArchiveAutomatic: () -> Unit,
     onCheckUpdates: () -> Unit,
+    onDiagnosticMode: (Boolean) -> Unit,
     onConfirmPreviewOrigin: () -> Unit,
     onClosePreviewReview: () -> Unit,
 ) {
@@ -157,16 +159,7 @@ fun IbudaoaApp(
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
-            NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
-                Destination.entries.forEach { item ->
-                    NavigationBarItem(
-                        selected = destination == item,
-                        onClick = { destination = item },
-                        icon = { Icon(item.icon, contentDescription = null) },
-                        label = { Text(item.label) },
-                    )
-                }
-            }
+            AppNavigation(destination) { destination = it }
         },
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
@@ -200,7 +193,7 @@ fun IbudaoaApp(
                     onConnect = { showWarmup = true; onReconnect() },
                     onAccountCheck = { showWarmup=false;showAccountCheck=true },
                     onMessage = onMessage,
-                    onDisableMap = { onMapConsent(false) }, onCheckUpdates=onCheckUpdates,
+                    onDisableMap = { onMapConsent(false) }, onCheckUpdates=onCheckUpdates, onDiagnosticMode=onDiagnosticMode,
                 )
             }
         }
@@ -501,7 +494,21 @@ fun IbudaoaApp(
 }
 
 @Composable
-private fun MapPage(
+internal fun AppNavigation(destination: Destination, onSelect: (Destination) -> Unit) {
+    NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
+        Destination.entries.forEach { item ->
+            NavigationBarItem(
+                selected = destination == item,
+                onClick = { onSelect(item) },
+                icon = { Icon(item.icon, contentDescription = null) },
+                label = { Text(item.label) },
+            )
+        }
+    }
+}
+
+@Composable
+internal fun MapPage(
     state: AppState,
     runningPage: Boolean,
     onWarmup: () -> Unit,
@@ -521,6 +528,7 @@ private fun MapPage(
     onFinishAutomatic: () -> Unit,
     onArchiveAutomatic: () -> Unit,
     mapActive: Boolean,
+    mapBackground: (@Composable () -> Unit)? = null,
 ) {
     var expanded by remember { mutableStateOf(false) }
     var confirmAutomaticFinish by rememberSaveable { mutableStateOf(false) }
@@ -541,7 +549,7 @@ private fun MapPage(
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(
             colors.primaryContainer.copy(alpha = 0.40f), colors.background, colors.secondaryContainer,
         ))))
-        CampusMap(state.config, state.mapConsent, mapActive, state.roadEvidence,
+        if (mapBackground != null) mapBackground() else CampusMap(state.config, state.mapConsent, mapActive, state.roadEvidence,
             state.automaticRoute ?: state.localPreview?.route ?: (state.routeResult as? io.github.ibudaoa.roads.RoutePlanResult.Draft)?.route,
             selectedIds=state.automaticRoute?.selectedIds ?: state.localPreview?.points?.selectedIds.orEmpty(),
             automaticDisplay=runningPage && state.automaticRun.phase!=io.github.ibudaoa.running.AutomaticRunPhase.IDLE,
@@ -569,11 +577,11 @@ private fun MapPage(
                         IconButton(onClick = { expanded = true }) { Icon(Icons.Default.MoreVert, "更多操作") }
                         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                             DropdownMenuItem(text = { Text("跑前热身") }, onClick = { expanded = false; onWarmup() })
-                            DropdownMenuItem(text={Text("导出诊断")},enabled=state.config!=null && !state.busy,
+                            if (state.diagnosticMode) DropdownMenuItem(text={Text("导出诊断")},enabled=state.config!=null && !state.busy,
                                 onClick={expanded=false;onExport()})
-                            DropdownMenuItem(text={Text("确认往返道路")},enabled=state.baseRoadGraph?.edges?.isNotEmpty()==true && !state.busy && !state.capture.active,
+                            if (BuildConfig.DEBUG) DropdownMenuItem(text={Text("确认往返道路")},enabled=state.baseRoadGraph?.edges?.isNotEmpty()==true && !state.busy && !state.capture.active,
                                 onClick={expanded=false;onReviewRoadDirections()})
-                            DropdownMenuItem(text={Text("手动确认道路连接")},enabled=state.gapPlan?.gaps?.isNotEmpty()==true && !state.busy && !state.capture.active,
+                            if (BuildConfig.DEBUG) DropdownMenuItem(text={Text("手动确认道路连接")},enabled=state.gapPlan?.gaps?.isNotEmpty()==true && !state.busy && !state.capture.active,
                                 onClick={expanded=false;onReviewRoadGaps()})
                             if (BuildConfig.DEBUG) {
                                 DropdownMenuItem(text={ Text("本地路线预览") },
@@ -622,7 +630,7 @@ private fun MapPage(
                         io.github.ibudaoa.running.RunningPlanPhase.PLANNED -> "本次计划 · 预计${((state.runningPlanSummary.durationSeconds ?: 0)+59)/60}分钟"
                         else -> "计划尚未就绪"
                     })
-                    if (state.runningPlanSummary.problem == io.github.ibudaoa.running.RunningPlanProblem.ROAD_REVIEW)
+                    if (BuildConfig.DEBUG && state.runningPlanSummary.problem == io.github.ibudaoa.running.RunningPlanProblem.ROAD_REVIEW)
                         TextButton(onClick = onReviewRoadGaps, enabled = !state.busy) { Text("核对已有道路连接") }
                     state.runningPlanSummary.accessDistanceMeters?.let { Text("自动路径包含约${it}米当前位置接入路段。") }
                 }
@@ -707,7 +715,7 @@ private fun Metric(label: String, value: String, modifier: Modifier = Modifier) 
 }
 
 @Composable
-private fun SettingsPage(state: AppState, onExit: () -> Unit, onConnect: () -> Unit, onAccountCheck: () -> Unit, onMessage: (String) -> Unit, onDisableMap: () -> Unit, onCheckUpdates: () -> Unit) {
+internal fun SettingsPage(state: AppState, onExit: () -> Unit, onConnect: () -> Unit, onAccountCheck: () -> Unit, onMessage: (String) -> Unit, onDisableMap: () -> Unit, onCheckUpdates: () -> Unit, onDiagnosticMode: (Boolean) -> Unit) {
     val profile = state.capture.profile?.takeIf {
         state.capturedConfig && state.capture.phase == CapturePhase.CAPTURED &&
             it.schoolName != null && it.schoolName == state.config?.schoolName
@@ -752,9 +760,19 @@ private fun SettingsPage(state: AppState, onExit: () -> Unit, onConnect: () -> U
             }
         }
         if (state.mapConsent) TextButton(onClick = onDisableMap, enabled = !state.busy) { Text("停用地图与定位") }
-        val repository=io.github.ibudaoa.updates.ReleaseRepository.parse(BuildConfig.REPOSITORY_URL)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("调试模式")
+            Text("保留少量诊断以排查问题，关闭后清除。", style=MaterialTheme.typography.bodySmall)
+        }
+        androidx.compose.material3.Switch(checked=state.diagnosticMode, onCheckedChange=onDiagnosticMode,
+            enabled=!state.busy && !state.automaticRun.blocksExternalUi)
+    }
+    val repository=io.github.ibudaoa.updates.ReleaseRepository.parse(BuildConfig.REPOSITORY_URL)
         val uriHandler=LocalUriHandler.current
+        val inspecting = LocalInspectionMode.current
         fun openPage(url:String) {
+            if (inspecting) return
             if(state.automaticRun.blocksExternalUi)onMessage("请等待本次执行结束后再打开外部页面。")
             else runCatching { uriHandler.openUri(url) }.onFailure { onMessage("无法打开页面，请检查浏览器。") }
         }
@@ -787,7 +805,7 @@ private fun ToolCard(title: String, subtitle: String, icon: ImageVector, trailin
 }
 
 @Composable
-private fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: () -> Unit) {
+internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: () -> Unit) {
     val capture = state.capture
     val roads = state.roadReport
     val needsRoadReview = roads != null && roads.reviewRevision != io.github.ibudaoa.roads.RoadBatchReport.CURRENT_REVIEW_REVISION
@@ -854,7 +872,7 @@ private fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: () 
         !state.certificateTrusted && state.certificateExported -> "安装证书"
         else -> "继续"
     }
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    val content: @Composable () -> Unit = {
         Surface(Modifier.padding(horizontal = 16.dp, vertical = 24.dp).widthIn(max = 560.dp)
             .fillMaxWidth().fillMaxHeight(0.78f), shape = RoundedCornerShape(28.dp),
             color = MaterialTheme.colorScheme.surface) {
@@ -891,6 +909,9 @@ private fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: () 
             }
         }
     }
+    // Layoutlib renders the same card inline; the device retains its modal window.
+    if (LocalInspectionMode.current) content()
+    else Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false), content = content)
 }
 
 private fun formatRuleTime(seconds: Int): String = if (seconds % 60 == 0)

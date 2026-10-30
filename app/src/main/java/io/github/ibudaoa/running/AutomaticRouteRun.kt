@@ -9,7 +9,7 @@ enum class RunFinishStage { STORAGE_REQUEST, STORAGE_DECODE, FILE_BUILD, TRACK_U
 enum class AutomaticRunPhase { IDLE, STARTING, RUNNING, PAUSED, INTERRUPTED, FINISHING, AWAITING_VERDICT, VALID, INVALID, FAILED }
 data class AutomaticRunSummary(val phase:AutomaticRunPhase=AutomaticRunPhase.IDLE,val meters:Double=0.0,
     val targetMeters:Double=0.0,val elapsedSeconds:Long=0,val visitedPoints:Int=0,val requiredPoints:Int=0,
-    val platformStarted:Boolean=false,val recordBound:Boolean=false,val recordVerified:Boolean=false,val problem:String?=null,val serverPointCount:Int?=null,val serverStatus:Int?=null,val remainingSeconds:Long?=null,val pendingWrite:String?=null,val finishStage:RunFinishStage?=null) {
+    val platformStarted:Boolean=false,val recordBound:Boolean=false,val recordVerified:Boolean=false,val problem:String?=null,val serverPointCount:Int?=null,val serverStatus:Int?=null,val remainingSeconds:Long?=null,val pendingWrite:String?=null,val finishStage:RunFinishStage?=null, val identityChecks:Map<String,RecordFieldCheck> = emptyMap()) {
     val blocksExternalUi:Boolean get()=phase in setOf(AutomaticRunPhase.STARTING,AutomaticRunPhase.RUNNING,AutomaticRunPhase.PAUSED,AutomaticRunPhase.FINISHING)
     val progressFraction:Float get()=if(targetMeters>0) (meters/targetMeters).coerceIn(0.0,1.0).toFloat() else 0f
 }

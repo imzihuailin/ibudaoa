@@ -64,4 +64,28 @@ class RunRecordVerificationTest {
         assertFalse(sensitive.summary.toString().contains("synthetic"))
     }
 
+    @Test fun `identity diagnostics distinguish missing invalid and mismatch without values`() {
+        val text=detail().toString(Charsets.UTF_8)
+        val cases=listOf(
+            Triple("\"uid\":123", "\"uid\":{}", "uid" to RecordFieldCheck.INVALID),
+            Triple("\"game_id\":6", "\"game_id\":7", "game_id" to RecordFieldCheck.MISMATCH))
+        for ((old,new,check) in cases) {
+            val result=RunRecordVerifier.decode(text.replace(old,new).toByteArray(),expected)
+            assertEquals(RunRecordVerdict.MISMATCH,result.verdict)
+            assertEquals(check.second,result.identityChecks[check.first])
+            assertFalse(result.toString().contains("1700000000"))
+        }
+    }
+
+    @Test fun `detail without id uses exact requested record with remaining identity checks`() {
+        val noId=detail().toString(Charsets.UTF_8).replace("\"id\":45,", "")
+        val result=RunRecordVerifier.decode(noId.toByteArray(),expected)
+        assertTrue(result.platformValid)
+        assertEquals(RecordFieldCheck.MISSING,result.identityChecks["id"])
+        val wrongUid=noId.replace("\"uid\":123", "\"uid\":124")
+        assertEquals(RunRecordVerdict.MISMATCH,RunRecordVerifier.decode(wrongUid.toByteArray(),expected).verdict)
+        val invalidId=noId.replace("\"uid\":123", "\"id\":null,\"uid\":123")
+        assertEquals(RunRecordVerdict.MISMATCH,RunRecordVerifier.decode(invalidId.toByteArray(),expected).verdict)
+    }
+
 }

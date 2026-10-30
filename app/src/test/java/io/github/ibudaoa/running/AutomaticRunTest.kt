@@ -30,6 +30,7 @@ class AutomaticRunTest {
         override fun load()=bytes?.clone()
         override fun save(bytes:ByteArray) { this.bytes=bytes.clone() }
         override fun clear() { bytes=null }
+        override fun archiveResolved(bytes:ByteArray) {}
     }
     private inner class Harness {
         var clock=1000L;var bound=true;var prepared=true;var fail:RunEndpoint?=null

@@ -20,7 +20,7 @@ enum class RunningPlanProblem(val label:String) {
     FACE("当前核验要求尚未适配"), LOCATION("请等待新鲜准确的前台定位"),
     SYNC_INCOMPLETE("最新规则与本地道路同步未完成，请重新生成计划"),
     ROAD_REVIEW("当前道路连接确认缺失，请核对并保存道路连接及往返"),
-    ROADS("当前道路尚未就绪"), ORIGIN("请先核对当前位置到道路的连接"),
+    ROADS("当前道路尚未就绪"), ROAD_UNREACHABLE("当前点位之间没有可用道路路线"), ROAD_DISTANCE("当前道路无法满足距离要求"), ROAD_CALCULATION("道路路线计算未完成"), ORIGIN("请先核对当前位置到道路的连接"),
     PACE_MARGIN("配速区间不足以留出必要余量"), TIME_REMAINING("当前时段剩余时间不足以完成计划"),
     CANCELLED("已离开前台或取消，计划已失效"),
     TASK_STATE("已有未核对的运动状态，请先核对平台记录"),

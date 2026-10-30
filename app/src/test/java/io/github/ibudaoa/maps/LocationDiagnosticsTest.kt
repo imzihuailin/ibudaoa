@@ -55,7 +55,7 @@ class LocationDiagnosticsTest {
         val text=PreparationExport.encode(config,1,1,null,location=health.value)
         val exported=Json.parseToJsonElement(text).jsonObject.getValue("foreground_location").jsonObject
         assertEquals(setOf("status","configured_transport","fine_permission","system_location_enabled","callbacks",
-            "accepted","sdk_errors","last_sdk_code","accuracy_band","coordinate_frame"),exported.keys)
+            "accepted","sdk_errors","retries","last_sdk_code","accuracy_band","coordinate_frame"),exported.keys)
         assertEquals(7,exported.getValue("last_sdk_code").jsonPrimitive.int)
         assertEquals("HTTPS",exported.getValue("configured_transport").jsonPrimitive.content)
         assertFalse(text.contains("latitude"));assertFalse(text.contains("longitude"));assertFalse(text.contains("errorInfo"))

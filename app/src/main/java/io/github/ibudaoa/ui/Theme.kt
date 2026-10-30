@@ -5,7 +5,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 
 private val LightColors = lightColorScheme(
     primary = Color(0xFF0D6047),
@@ -39,5 +42,9 @@ private val DarkColors = darkColorScheme(
 
 @Composable
 fun IbudaoaTheme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = if (isSystemInDarkTheme()) DarkColors else LightColors, content = content)
+    // This app uses the regular typography scale, independent of the system font size.
+    val density = LocalDensity.current.density
+    CompositionLocalProvider(LocalDensity provides Density(density = density, fontScale = 1f)) {
+        MaterialTheme(colorScheme = if (isSystemInDarkTheme()) DarkColors else LightColors, content = content)
+    }
 }

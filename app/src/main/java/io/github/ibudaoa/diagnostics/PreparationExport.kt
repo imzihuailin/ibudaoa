@@ -43,6 +43,9 @@ object PreparationExport {
                 put("required_points",auto.requiredPoints.coerceIn(0,24));put("platform_started",auto.platformStarted)
                 put("record_bound",auto.recordBound);put("record_verified",auto.recordVerified)
                 auto.finishStage?.let { put("finish_stage",it.name) }
+                if (auto.identityChecks.isNotEmpty()) put("identity_checks", buildJsonObject {
+                    auto.identityChecks.filterKeys { it in setOf("id", "uid", "game_id", "start_time", "type") }.forEach { (key,value) -> put(key,value.name) }
+                })
                 auto.pendingWrite?.takeIf { value -> value in setOf("SELECT_ZONE","REGISTER","LOCATION","FINISH","GYROSCOPE") }?.let { put("pending_write",it) }
                 auto.serverPointCount?.takeIf { it in 0..24 }?.let { put("server_checkins",it) }
                 auto.serverStatus?.takeIf { it in -1..1000 }?.let { put("server_record_status",it) }
@@ -85,7 +88,7 @@ object PreparationExport {
                     put("status",check.status.name);put("configured_transport","HTTPS")
                     put("fine_permission",check.finePermission)
                     check.systemLocationEnabled?.let { put("system_location_enabled",it) }
-                    put("callbacks",check.callbacks);put("accepted",check.accepted);put("sdk_errors",check.sdkErrors)
+                    put("callbacks",check.callbacks);put("accepted",check.accepted);put("sdk_errors",check.sdkErrors);put("retries",check.retries)
                     check.lastSdkCode?.let { put("last_sdk_code",it) }
                     check.lastRejection?.let { put("last_rejection",it.name) }
                     put("accuracy_band",check.accuracyBand.name);put("coordinate_frame",check.coordinateFrame.name)

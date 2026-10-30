@@ -27,7 +27,7 @@ internal class AutomaticRunController(val ledger:RunTaskLedger,val timeline:Auto
         }
         return AutomaticRunSummary(phase,timeline.current()?.meters ?: 0.0,timeline.totalMeters,timeline.elapsedMillis/1000,
             timeline.checkpoints().size,requiredPoints,task.platformStarted,task.recordBound,task.recordVerified,problem,ledger.serverPointCount(),ledger.serverRecordStatus(),
-            ((timeline.durationMillis-timeline.activeMillis).coerceAtLeast(0)+999)/1000,ledger.pendingWrite()?.name,ledger.finishStage())
+            ((timeline.durationMillis-timeline.activeMillis).coerceAtLeast(0)+999)/1000,ledger.pendingWrite()?.name,ledger.finishStage(),ledger.identityChecks())
     }
     suspend fun start():Boolean {
         if(starting || ledger.summary.phase!=RunTaskPhase.PREPARED || !bound() || !preparationCurrent())return false
@@ -81,7 +81,14 @@ internal class AutomaticRunController(val ledger:RunTaskLedger,val timeline:Auto
                 } catch(e:CancellationException) { ledger.uncertain(permit);throw e }
                 catch(_:Exception) { ledger.uncertain(permit);problem="ASSOCIATION_UNCERTAIN";return false }
             }
-            return query()
+            val delays = longArrayOf(0L, 5_000L, 15_000L, 30_000L, 60_000L)
+            for (wait in delays) {
+                if (wait > 0) kotlinx.coroutines.delay(wait)
+                if (!foreground || !bound()) return false
+                if (query()) return true
+                if (ledger.summary.phase == RunTaskPhase.INVALID || problem == "RECORD_MISMATCH") return false
+            }
+            return false
         } finally { finishing=false }
     }
     suspend fun query():Boolean {

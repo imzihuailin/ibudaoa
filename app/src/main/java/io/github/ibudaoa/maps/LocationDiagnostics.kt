@@ -8,6 +8,7 @@ data class LocationDiagnostics(
     val status: LocationCheckStatus,
     val finePermission: Boolean,
     val systemLocationEnabled: Boolean?,
+    val retries: Int = 0,
     val callbacks: Int = 0,
     val accepted: Int = 0,
     val sdkErrors: Int = 0,
@@ -65,11 +66,12 @@ internal class LocationHealthTracker(fine: Boolean, enabled: Boolean?) {
             lastSdkCode=0,lastRejection=rejection,accuracyBand=band,coordinateFrame=frame)
     }
     fun noCallback() {
-        if (value.status == LocationCheckStatus.STARTING && value.callbacks == 0)
+        if (value.status == LocationCheckStatus.STARTING)
             value=value.copy(status=LocationCheckStatus.NO_CALLBACK)
     }
     fun expired() {
         if (value.status == LocationCheckStatus.ACCEPTED) value=value.copy(status=LocationCheckStatus.EXPIRED,lastRejection=FixRejection.EXPIRED)
     }
+    fun restarted() { value=value.copy(status=LocationCheckStatus.STARTING, retries=increment(value.retries)) }
     fun initializationFailed() { value=value.copy(status=LocationCheckStatus.INITIALIZATION_FAILED) }
 }

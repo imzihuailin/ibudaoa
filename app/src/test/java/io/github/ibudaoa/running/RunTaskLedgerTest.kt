@@ -5,8 +5,9 @@ import org.junit.Test
 
 class RunTaskLedgerTest {
     private class Journal:RunTaskJournal {
-        var bytes:ByteArray?=null;var fail=false;var saves=0
+        var bytes:ByteArray?=null;var archived:ByteArray?=null;var fail=false;var saves=0
         override fun load()=bytes?.clone()
+        override fun archiveResolved(bytes:ByteArray) { if(fail) error("synthetic archive failure"); archived=bytes.clone() }
         override fun clear() { if(fail)error("synthetic removal failure");bytes?.fill(0);bytes=null }
         override fun save(bytes:ByteArray) { if(fail)error("synthetic storage failure");this.bytes=bytes.clone();saves++ }
     }
@@ -144,8 +145,9 @@ class RunTaskLedgerTest {
         assertTrue(runCatching { task.releaseResolved() }.isFailure)
         task.verifyRecord(detail);journal.fail=true
         assertTrue(runCatching { task.releaseResolved() }.isFailure)
-        assertTrue(journal.bytes!=null);journal.fail=false
-        task.releaseResolved();assertNull(journal.bytes)
+        assertTrue(journal.bytes!=null);assertNull(journal.archived);journal.fail=false
+        task.archiveResolved();assertNotNull(journal.bytes);assertNotNull(journal.archived)
+        task.releaseResolved();assertNull(journal.bytes);assertNotNull(journal.archived);assertFalse(journal.archived!!.toString(Charsets.UTF_8).contains("proof"))
         assertEquals(RunTaskPhase.PREPARED,task(journal).summary.phase)
     }
     @Test fun `restoration for a different account never rebinds or removes the pending task`() {

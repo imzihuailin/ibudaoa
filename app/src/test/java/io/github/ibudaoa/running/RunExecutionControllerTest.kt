@@ -13,6 +13,7 @@ class RunExecutionControllerTest {
         override fun load()=bytes?.clone()
         override fun save(bytes:ByteArray) { this.bytes=bytes.clone() }
         override fun clear() { bytes=null }
+        override fun archiveResolved(bytes:ByteArray) {}
     }
     private val metric=object:PlatformDistance {
         override val implementationId="synthetic-flat"

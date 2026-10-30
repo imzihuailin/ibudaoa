@@ -499,7 +499,7 @@ class DiagnosticStoreTest {
         assertEquals(before.connectionEpoch+1,ready.graph.scope.connectionEpoch)
         assertEquals(2,ready.graph.edges.size)
         assertEquals(1,ready.graph.manualConfirmationCount)
-        assertEquals(1,ready.graph.reviewedTwoWayRoadCount)
+        assertEquals(0,ready.graph.reviewedTwoWayRoadCount)
         assertEquals(setOf(0),committed.manualGaps!!.indices)
         assertEquals(committed.roadEvidence!!.scope,ready.graph.scope)
     }

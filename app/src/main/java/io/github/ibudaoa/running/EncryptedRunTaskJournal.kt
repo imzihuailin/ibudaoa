@@ -36,7 +36,7 @@ internal object RunTaskJournalCipher {
         } catch(_:Exception) { throw IllegalStateException("Run checkpoint cannot be recovered") }
     }
 }
-internal class AndroidRunTaskJournal(context:Context):RunTaskJournal {
+internal class AndroidRunTaskJournal(private val context:Context):RunTaskJournal {
     private val file=AtomicFile(File(context.applicationContext.noBackupFilesDir,"run-task-v1.aead"))
     private fun key(create:Boolean):SecretKey {
         val store=KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -78,6 +78,20 @@ internal class AndroidRunTaskJournal(context:Context):RunTaskJournal {
         check(!file.baseFile.exists() && !File(file.baseFile.path+".bak").exists() && !File(file.baseFile.path+".new").exists()) {
             "Run checkpoint removal incomplete"
         }
+    }
+    @Synchronized override fun archiveResolved(bytes: ByteArray) {
+        if (!DiagnosticMode.enabled(context)) { DiagnosticMode.clear(context); return }
+        val root=kotlinx.serialization.json.Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)) as kotlinx.serialization.json.JsonObject
+        val id=java.util.UUID.fromString((root["task"] as kotlinx.serialization.json.JsonPrimitive).content).toString()
+        val dir=file.baseFile.parentFile!!
+        val destination=AtomicFile(File(dir,"run-result-$id.aead"))
+        val sealed=RunTaskJournalCipher.seal(bytes,key(false))
+        var output:java.io.FileOutputStream?=null
+        try { output=destination.startWrite();output.write(sealed);destination.finishWrite(output);output=null }
+        catch(e:Exception) { output?.let(destination::failWrite);throw e }
+        finally { sealed.fill(0) }
+        val archives=dir.listFiles().orEmpty().filter { it.name.matches(Regex("run-result-[a-f0-9-]{36}\\.aead")) }.sortedByDescending { it.lastModified() }
+        archives.filter { it.name != destination.baseFile.name }.drop(2).forEach { check(it.delete() || !it.exists()) { "Result archive rotation failed" } }
     }
     /** Preserve a sealed audit copy before the user explicitly retires the local unresolved slot. */
     @Synchronized fun archiveManuallyReviewed() {

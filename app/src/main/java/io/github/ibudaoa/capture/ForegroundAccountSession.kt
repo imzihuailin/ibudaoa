@@ -250,7 +250,7 @@ internal class ForegroundAccountSession(private val clock:()->Long={System.nanoT
         var working:ByteArray
         synchronized(this) {
             expire()
-            if(!foreground || material==null || mutable.value.phase !in setOf(AccountSessionPhase.RESTORED,AccountSessionPhase.READY,AccountSessionPhase.RETRYABLE)) {
+            if(!foreground || active!=null || material==null || mutable.value.phase !in setOf(AccountSessionPhase.RESTORED,AccountSessionPhase.READY,AccountSessionPhase.RETRYABLE)) {
                 runCatching { connection.close() };return
             }
             ticket=generation;revision=credentialRevision;working=material!!.clone();active=connection

@@ -59,4 +59,17 @@ class RoadGapEvidenceTest {
         assertTrue(wrong.edges.isEmpty())
     }
 
+    @Test fun `automatic policy connects SDK steps and creates reverse without confirmation`() {
+        val graph = ObservedRoadGraphBuilder.build(config, evidence, AmapDistance(), automatic = true)
+        assertEquals(2, graph.edges.size)
+        assertTrue(graph.unjoinedLegs.isEmpty())
+        val forward = graph.edges.single { it.fromId == "a" }
+        val reverse = graph.edges.single { it.fromId == "b" }
+        assertEquals(listOf(RoadFixture.a, before, after, RoadFixture.c), forward.points)
+        assertEquals(forward.points.reversed(), reverse.points)
+        assertTrue(forward.meters > 0)
+        assertEquals(0, graph.manualConfirmationCount)
+        assertEquals(0, graph.reviewedTwoWayRoadCount)
+    }
+
 }

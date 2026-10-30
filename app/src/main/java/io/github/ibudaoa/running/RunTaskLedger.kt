@@ -12,6 +12,7 @@ internal interface RunTaskJournal {
     /** Must atomically and durably replace the previous encrypted checkpoint, or throw. */
     fun save(bytes:ByteArray)
     fun clear()
+    fun archiveResolved(bytes: ByteArray)
 }
 internal class RunWritePermit internal constructor(internal val sequence:Long,internal val operation:RunWrite) {
     override fun toString()="RunWritePermit(private)"
@@ -121,6 +122,9 @@ internal class RunTaskLedger private constructor(private val journal:RunTaskJour
         val expected=ExpectedRunRecord(number("record")!!,number("account")!!,number("zone")!!,number("start")!!)
         val inspected=RunRecordVerifier.inspect(response,expected)
         val result=inspected.summary
+        save(mapOf(
+            "identity_checks" to result.identityChecks.takeIf { it.isNotEmpty() }?.let { checks -> JsonObject(checks.mapValues { JsonPrimitive(it.value.name) }) },
+            "last_verdict" to JsonPrimitive(result.verdict.name)))
         if(result.identityMatched) {
             val changes=mutableMapOf<String,JsonElement?>("failure_reason" to inspected.failureReason?.let(::JsonPrimitive),
                 "server_points" to result.serverPointCount?.let(::JsonPrimitive),"server_status" to result.serverStatus?.let(::JsonPrimitive))
@@ -140,6 +144,12 @@ internal class RunTaskLedger private constructor(private val journal:RunTaskJour
         summary.phase==RunTaskPhase.WRITE_UNCERTAIN && text("pending")==RunWrite.FINISH.name && number("start")!=null && number("record")==null
     @Synchronized fun pendingWrite():RunWrite? = text("pending")?.let { RunWrite.valueOf(it) }
     @Synchronized fun serverPointCount():Int? = number("server_points")?.toInt()
+    @Synchronized fun identityChecks(): Map<String, RecordFieldCheck> =
+        (checkpoint["identity_checks"] as? JsonObject)?.mapNotNull { (key, value) ->
+            if (key !in setOf("id", "uid", "game_id", "start_time", "type")) null
+            else runCatching { key to RecordFieldCheck.valueOf(value.jsonPrimitive.content) }.getOrNull()
+        }?.toMap() ?: emptyMap()
+    @Synchronized fun lastVerdict(): String? = text("last_verdict")?.takeIf { value -> RunRecordVerdict.entries.any { it.name == value } }
     @Synchronized fun serverRecordStatus():Int? = number("server_status")?.toInt()
     @Synchronized fun failureReasonForDisplay():String? = text("failure_reason")
     @Synchronized fun requestContext():RunRequestContext {
@@ -157,9 +167,14 @@ internal class RunTaskLedger private constructor(private val journal:RunTaskJour
         check(canAbandonUnsent())
         journal.clear();closed=true
     }
-    @Synchronized fun releaseResolved() {
+    @Synchronized fun archiveResolved() {
         check(!closed && !storageFailed && foreground && text("pending")==null &&
             summary.phase in setOf(RunTaskPhase.VALID,RunTaskPhase.INVALID))
+        val minimal = JsonObject(checkpoint.filterKeys { it in setOf("schema", "task", "phase", "execution_mode", "account", "school", "term", "zone", "points", "start", "record", "finish_stage", "server_status", "server_points", "failure_reason", "identity_checks", "last_verdict") }).toString().toByteArray()
+        try { journal.archiveResolved(minimal) } finally { minimal.fill(0) }
+    }
+    @Synchronized fun releaseResolved() {
+        archiveResolved()
         journal.clear();closed=true
     }
     override fun toString()="RunTaskLedger(private)"

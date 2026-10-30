@@ -8,9 +8,11 @@ internal class ExpectedRunRecord(val recordId:Long,val accountId:Long,val zoneId
     init { require(recordId>0 && accountId>0 && zoneId>0 && startTime>0) }
     override fun toString()="ExpectedRunRecord(private)"
 }
+enum class RecordFieldCheck { MATCH, MISSING, INVALID, MISMATCH }
 enum class RunRecordVerdict { VALID, INVALID, PENDING, UNKNOWN, MISMATCH, QUERY_FAILED }
 data class RunRecordVerification(val verdict:RunRecordVerdict,val identityMatched:Boolean=false,
-    val hasFailureReason:Boolean=false,val serverPointCount:Int?=null,val serverStatus:Int?=null) {
+    val hasFailureReason:Boolean=false,val serverPointCount:Int?=null,val serverStatus:Int?=null,
+    val identityChecks:Map<String,RecordFieldCheck> = emptyMap()) {
     val platformValid:Boolean get()=identityMatched && verdict==RunRecordVerdict.VALID
 }
 
@@ -26,9 +28,18 @@ internal object RunRecordVerifier {
         return try {
             val data=BeforeRunDecoder.decodeSuccessfulData(bytes)
             fun number(key:String)=(data[key] as? JsonPrimitive)?.longOrNull
-            if(number("id")!=expected.recordId || number("uid")!=expected.accountId ||
-                number("game_id")!=expected.zoneId || number("start_time")!=expected.startTime || number("type")!=1L)
-                return InspectedRunRecord(RunRecordVerification(RunRecordVerdict.MISMATCH),null)
+            val checks = mapOf("id" to expected.recordId, "uid" to expected.accountId, "game_id" to expected.zoneId,
+                "start_time" to expected.startTime, "type" to 1L).mapValues { (key, expectedValue) ->
+                val value = data[key]
+                when {
+                    value == null -> RecordFieldCheck.MISSING
+                    (value as? JsonPrimitive)?.longOrNull == null -> RecordFieldCheck.INVALID
+                    number(key) != expectedValue -> RecordFieldCheck.MISMATCH
+                    else -> RecordFieldCheck.MATCH
+                }
+            }
+            if (checks.any { (key, check) -> check != RecordFieldCheck.MATCH && !(key == "id" && check == RecordFieldCheck.MISSING) })
+                return InspectedRunRecord(RunRecordVerification(RunRecordVerdict.MISMATCH, identityChecks=checks),null)
             val reason=(data["record_failed_reason"] as? JsonPrimitive)?.takeIf { it.isString }
                 ?.content?.isNotBlank()==true
             val status=number("record_status")
@@ -46,7 +57,7 @@ internal object RunRecordVerifier {
                     else raw.map { if(it.isISOControl()) ' ' else it }.joinToString("").trim()
                 }
             InspectedRunRecord(RunRecordVerification(verdict,true,reason,
-                number("log_num")?.takeIf { it in 0..24 }?.toInt(),status?.takeIf { it in -1..1000 }?.toInt()),text)
+                number("log_num")?.takeIf { it in 0..24 }?.toInt(),status?.takeIf { it in -1..1000 }?.toInt(), checks),text)
         } catch(_:Exception) { InspectedRunRecord(RunRecordVerification(RunRecordVerdict.QUERY_FAILED),null) }
     }
 }

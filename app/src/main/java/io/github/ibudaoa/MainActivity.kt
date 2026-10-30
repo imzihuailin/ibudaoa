@@ -83,6 +83,7 @@ class MainActivity : ComponentActivity() {
                 IbudaoaApp(
                     state = state,
                     events = model.events,
+                    onDiagnosticMode = model::setDiagnosticMode,
                     onAcknowledgePreparation = { model.continuePreparation(lifecycle) },
                     onImport = { importConfig.launch(arrayOf("application/json", "text/plain")) },
                     onExport = { if(state.automaticRun.blocksExternalUi)model.showMessage("请等待本次执行与记录核对结束后再导出，打开文件选择器会离开前台。") else exportConfig.launch("ibudaoa-diagnostic.json") },

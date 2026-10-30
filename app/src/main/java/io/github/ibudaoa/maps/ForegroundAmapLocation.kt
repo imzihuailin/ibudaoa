@@ -21,6 +21,18 @@ internal class ForegroundAmapLocation(private val context: Context) {
     private var publish: ((DisplayFix?,String)->Unit)?=null
     private var diagnostics: ((LocationDiagnostics)->Unit)?=null
     private var health: LocationHealthTracker?=null
+    private var retryCount=0
+    private val retry = Runnable {
+        val output = publish ?: return@Runnable
+        val diagnosticOutput = diagnostics ?: return@Runnable
+        startInternal(output, diagnosticOutput, false)
+    }
+    private fun scheduleRetry() {
+        handler.removeCallbacks(retry)
+        val delays = longArrayOf(5_000, 10_000, 20_000, 30_000)
+        handler.postDelayed(retry, delays[retryCount.coerceAtMost(delays.lastIndex)])
+        retryCount++
+    }
     private fun emit(fix: DisplayFix?) {
         val snapshot=health?.value ?: return
         diagnostics?.invoke(snapshot)
@@ -28,23 +40,29 @@ internal class ForegroundAmapLocation(private val context: Context) {
     }
     private val noCallback=Runnable {
         health?.noCallback()
-        if (health?.value?.status == LocationCheckStatus.NO_CALLBACK) emit(null)
+        if (health?.value?.status == LocationCheckStatus.NO_CALLBACK) { emit(null); scheduleRetry() }
     }
     private val expiry=object:Runnable {
         override fun run() {
             if (publish == null) return
             // Do not overwrite SDK errors or sample rejection reasons with a generic waiting message.
-            if (gate.expireIfNeeded(SystemClock.elapsedRealtime())) { health?.expired();emit(null) }
+            if (gate.expireIfNeeded(SystemClock.elapsedRealtime())) { health?.expired();emit(null);scheduleRetry() }
             handler.postDelayed(this,1_000)
         }
     }
 
     fun start(onFix: (DisplayFix?,String)->Unit, onDiagnostics: (LocationDiagnostics)->Unit = {}) {
+        startInternal(onFix, onDiagnostics, true)
+    }
+
+    private fun startInternal(onFix: (DisplayFix?,String)->Unit, onDiagnostics: (LocationDiagnostics)->Unit, reset: Boolean) {
+        val previousHealth = if (reset) null else health
         stop()
+        if (reset) retryCount=0
         publish=onFix; diagnostics=onDiagnostics
         val fine=context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED
         val enabled=runCatching { context.getSystemService(LocationManager::class.java)?.isLocationEnabled }.getOrNull()
-        health=LocationHealthTracker(fine,enabled)
+        health=if (previousHealth != null && fine && enabled != false) previousHealth.also { it.restarted() } else LocationHealthTracker(fine,enabled)
         emit(null)
         if (!fine || enabled == false) return
         attempt=gate.begin()
@@ -80,6 +98,7 @@ internal class ForegroundAmapLocation(private val context: Context) {
                         val fix=gate.accept(currentAttempt,CampusCoordinate(location.latitude,location.longitude),
                             location.accuracy,frame==LocationCoordinateFrame.GCJ02,location.isMock,
                             location.time,System.currentTimeMillis(),SystemClock.elapsedRealtime(),location.speed)
+                        if (fix != null) { retryCount=0; handler.removeCallbacks(retry) }
                         health?.sample(frame,location.accuracy,gate.lastRejection)
                         emit(fix)
                     }
@@ -95,6 +114,8 @@ internal class ForegroundAmapLocation(private val context: Context) {
             failed?.initializationFailed()
             stop()
             failed?.value?.let { diagnosticOutput?.invoke(it);output?.invoke(null,it.label) }
+            publish=output; diagnostics=diagnosticOutput; health=failed
+            scheduleRetry()
         }
     }
 
@@ -102,7 +123,7 @@ internal class ForegroundAmapLocation(private val context: Context) {
         attempt++
         gate.stop()
         publish=null;diagnostics=null;health=null
-        handler.removeCallbacks(expiry);handler.removeCallbacks(noCallback)
+        handler.removeCallbacks(expiry);handler.removeCallbacks(noCallback);handler.removeCallbacks(retry)
         client?.let { locator -> runCatching { locator.stopLocation() };runCatching { locator.onDestroy() } }
         client=null
     }

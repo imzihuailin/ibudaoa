@@ -32,7 +32,7 @@ class ObservedRoadGraph internal constructor(
 
 object ObservedRoadGraphBuilder {
     fun build(config: DiagnosticConfig, snapshot: RoadEvidenceSnapshot, distance: PlatformDistance,
-        gapEvidence: RoadGapEvidence? = null, manualGaps: ManualRoadGaps? = null): ObservedRoadGraph {
+        gapEvidence: RoadGapEvidence? = null, manualGaps: ManualRoadGaps? = null, automatic: Boolean = false): ObservedRoadGraph {
         require(snapshot.legs.isNotEmpty() && snapshot.legs.size <= 48)
         val nodes = ConfigurationReviewer.review(config).candidates?.associate { it.id to it.coordinate }
             ?: error("Invalid graph candidate table")
@@ -76,15 +76,26 @@ object ObservedRoadGraphBuilder {
             val hasOffset = assembled.components.first().first() != nodes.getValue(record.fromId) ||
                 assembled.components.last().last() != nodes.getValue(record.toId)
             if (hasOffset) offset.add(pair)
-            if (!assembled.continuous) unjoined.add(pair)
+            if (!assembled.continuous && !automatic) unjoined.add(pair)
             // Keep the official checkpoint and road endpoint distinct. Proximity permits a local draft,
             // never a connector to the checkpoint, a successful check-in, or a jump between road ends.
             val nearby = proximity[pair]?.let { it.startWithinRadius && it.endWithinRadius } == true
-            if (!assembled.continuous || (hasOffset && !nearby)) continue
-            val line = assembled.components.single()
+            if ((!assembled.continuous && !automatic) || (hasOffset && !nearby)) continue
+            val line = if (automatic) assembled.components.flatten() else assembled.components.single()
             val meters = line.zipWithNext().sumOf { (a, b) -> distance.meters(a, b).also { require(it.isFinite() && it >= 0) } }
             if (meters >= 0.001 && meters <= 1_000_000)
                 edges.add(ObservedRoadEdge(record.fromId, record.toId, line, meters))
+        }
+        if (automatic) {
+            val keys = edges.map { it.fromId to it.toId }.toMutableSet()
+            for (forward in edges.toList()) {
+                val reverse = forward.toId to forward.fromId
+                if (keys.add(reverse)) {
+                    edges.add(ObservedRoadEdge(reverse.first, reverse.second, forward.points.reversed(), forward.meters))
+                    proximity[forward.fromId to forward.toId]?.let { proximity[reverse] = CheckpointEndpointProximity(it.endWithinRadius, it.startWithinRadius) }
+                    if ((forward.fromId to forward.toId) in offset) offset.add(reverse)
+                }
+            }
         }
         return ObservedRoadGraph(snapshot.scope, fingerprint, nodes.toMap(), edges.toList(), unjoined.toSet(), offset.toSet(),
             if (radius != null) proximity.toMap() else null,

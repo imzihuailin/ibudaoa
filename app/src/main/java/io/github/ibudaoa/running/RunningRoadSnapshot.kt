@@ -18,10 +18,8 @@ internal data class RunningRoadSnapshot(val storage: PointPlanningStorage, val b
             val roads = storage.roadEvidence ?: error("Missing committed road evidence")
             check(report.scope == roads.scope && roads.scope.connectionEpoch == storage.connectionEpoch)
             check(roads.scope == RoadBatchPlan.create(config, storage.connectionEpoch).scope)
-            val base = ObservedRoadGraphBuilder.build(config, roads, distance, storage.gapEvidence, storage.manualGaps)
-            val graph = storage.reviewedDirections?.let {
-                ReviewedRoadDirectionsBuilder.apply(base, it, storage.manualGaps)
-            } ?: base
+            val base = ObservedRoadGraphBuilder.build(config, roads, distance, storage.gapEvidence, storage.manualGaps, automatic = true)
+            val graph = base
             return RunningRoadSnapshot(storage, base, graph, RoadGapPlan.create(config, roads, distance))
         }
     }

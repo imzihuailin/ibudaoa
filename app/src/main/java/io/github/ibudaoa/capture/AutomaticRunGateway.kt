@@ -67,3 +67,16 @@ internal class AutomaticRunGateway(private val session:ForegroundAccountSession,
             "year_num" to Instant.ofEpochSecond(record.startTime).atZone(ZoneId.of("Asia/Shanghai")).year.toString()))
     }
 }
+
+/** Read an already bound record without requiring new-run configuration. */
+internal class RunRecordReader(private val session: ForegroundAccountSession,
+    private val now: () -> Instant = { Instant.now() },
+    private val connection: () -> AccountReadConnection = { RunApiHttpsTransport() }) {
+    suspend fun record(context: RunRequestContext, record: ExpectedRunRecord): ByteArray = withContext(Dispatchers.IO) {
+        check(record.accountId == context.account && record.zoneId == context.zone && record.startTime == context.registeredStart)
+        session.runRequest(connection(), RunEndpoint.RECORD, context, mapOf(
+            "record_id" to record.recordId.toString(), "record_uid" to context.account.toString(),
+            "year_num" to Instant.ofEpochSecond(record.startTime).atZone(ZoneId.of("Asia/Shanghai")).year.toString()),
+            now().epochSecond, 100_000 + SecureRandom().nextInt(900_000))
+    }
+}

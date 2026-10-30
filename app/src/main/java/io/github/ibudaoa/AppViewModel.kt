@@ -53,6 +53,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 data class AppState(
+    val diagnosticMode: Boolean = false,
     val loaded: Boolean = false,
     val config: DiagnosticConfig? = null,
     val preparationAcknowledged: Boolean = false,
@@ -129,7 +130,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var requestedCapturePurpose: CapturePurpose = CapturePurpose.CONFIG
         private set
 
+    fun setDiagnosticMode(enabled: Boolean) {
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { io.github.ibudaoa.running.DiagnosticMode.set(getApplication(), enabled) }
+                mutableState.update { it.copy(diagnosticMode=enabled) }
+            } catch (_: Exception) { showMessage("调试模式设置未能保存，请重试。") }
+        }
+    }
     init {
+        viewModelScope.launch {
+            val enabled=withContext(Dispatchers.IO) {
+                val value=io.github.ibudaoa.running.DiagnosticMode.enabled(getApplication())
+                if (!value) io.github.ibudaoa.running.DiagnosticMode.clear(getApplication())
+                value
+            }
+            mutableState.update { it.copy(diagnosticMode=enabled) }
+        }
         viewModelScope.launch {
             AccountSessionRuntime.session.state.collect { session -> mutableState.update { it.copy(accountSession=session) } }
         }
@@ -196,9 +213,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     if (snapshot.config != null && evidence != null) {
                         val computed = withContext(Dispatchers.Default) {
                             val metric = AmapDistance()
-                            val base = runCatching { ObservedRoadGraphBuilder.build(snapshot.config, evidence, metric, snapshot.gapEvidence, snapshot.manualGaps) }.getOrNull()
-                            val graph = if (base != null && snapshot.reviewedDirections != null)
-                                runCatching { ReviewedRoadDirectionsBuilder.apply(base, snapshot.reviewedDirections, snapshot.manualGaps) }.getOrNull() else base
+                            val base = runCatching { ObservedRoadGraphBuilder.build(snapshot.config, evidence, metric, snapshot.gapEvidence, snapshot.manualGaps, automatic = true) }.getOrNull()
+                            val graph = base
                             val route = if (graph != null && snapshot.cache != null) runCatching {
                                 RouteDraftBuilder.build(snapshot.config, snapshot.captured, snapshot.cache, graph,
                                     metric.implementationId, Instant.now(), ZoneId.of("Asia/Shanghai"), metric)
@@ -268,8 +284,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             return blockRunningPlan(RunningPlanProblem.TASK_STATE)
         val baseline=initial.config ?: return showMessage("请先完成学校配置。")
         if(!initial.mapConsent || !initial.capturedConfig) return showMessage("请先完成跑前热身。")
+        if (initial.roadEvidence == null && initial.roadReport == null && initial.manualGaps == null && initial.reviewedDirections == null) {
+            continuePreparation(lifecycle)
+            val pending = roadJob ?: return
+            runPreparationJob = viewModelScope.launch {
+                try {
+                    pending.join()
+                    if (!lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) return@launch
+                    if (state.value.roadEvidence == null) { blockRunningPlan(RunningPlanProblem.ROADS); return@launch }
+                    kotlinx.coroutines.withTimeoutOrNull(10_000) { state.first { it.roadGraph != null } }
+                    runPreparationJob = null
+                    prepareRunningPlan(lifecycle)
+                } finally { if (runPreparationJob === currentCoroutineContext()[Job]) runPreparationJob = null }
+            }
+            return
+        }
         if(initial.roadGraph?.edges?.isEmpty()==true && initial.gapPlan?.gaps?.isNotEmpty()==true)
-            return blockRunningPlan(RunningPlanProblem.ROAD_REVIEW)
+            return blockRunningPlan(RunningPlanProblem.ROADS)
         preparingRun=true;preparedRunningPlan=null;runGrant=null
         mutableState.update { it.copy(busy=true,localPreview=null,runningPlanSummary=RunningPlanSummary(RunningPlanPhase.CHECKING)) }
         runPreparationJob=viewModelScope.launch {
@@ -312,7 +343,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 if(config!=RunningRoadSnapshot.canonical(grant.config)) return@launch blockRunningPlan(RunningPlanProblem.CONFIGURATION_CHANGED)
                 val graph=state.value.roadGraph ?: return@launch blockRunningPlan(RunningPlanProblem.ROADS)
                 if(graph.edges.isEmpty() && state.value.gapPlan?.gaps?.isNotEmpty()==true)
-                    return@launch blockRunningPlan(RunningPlanProblem.ROAD_REVIEW)
+                    return@launch blockRunningPlan(RunningPlanProblem.ROADS)
                 val zone=ZoneId.of("Asia/Shanghai")
                 RunningPlanRules.problem(config,Instant.now(),zone)?.let { return@launch blockRunningPlan(it) }
                 mutableState.update { it.copy(runningPlanSummary=RunningPlanSummary(RunningPlanPhase.WAITING_LOCATION)) }
@@ -461,6 +492,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         publishAutomatic()
         if(!automaticJournalPending)return
         if(controller.summary.phase in setOf(AutomaticRunPhase.VALID,AutomaticRunPhase.INVALID)) {
+            withContext(Dispatchers.IO) {
+                controller.ledger.archiveResolved()
+            }
             val cache=store.pointPlanningStorage.first().cache
             if(cache?.locked==true)store.releaseResolvedPointCache(cache)
             withContext(Dispatchers.IO) { controller.ledger.releaseResolved() }
@@ -535,16 +569,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val account=AccountSessionRuntime.session.runAccountId() ?: error("Account unavailable")
                 val ledger=withContext(Dispatchers.IO) { RunTaskLedger.restore(automaticJournal,account) } ?: error("No pending task")
                 ledger.foreground()
-                mutableState.update { it.copy(automaticRun=it.automaticRun.copy(platformStarted=ledger.summary.platformStarted,recordBound=ledger.summary.recordBound,pendingWrite=ledger.pendingWrite()?.name,finishStage=ledger.finishStage())) }
+                mutableState.update { it.copy(automaticRun=it.automaticRun.copy(platformStarted=ledger.summary.platformStarted,recordBound=ledger.summary.recordBound,pendingWrite=ledger.pendingWrite()?.name,finishStage=ledger.finishStage(),identityChecks=ledger.identityChecks(),problem=ledger.lastVerdict()?.let { "RECORD_$it" })) }
                 if(!ledger.summary.recordBound) { showMessage("上次自动任务结果尚未确认，暂不能重开或恢复推进。请导出诊断。");return@launch }
                 val context=ledger.requestContext()
-                val config=state.value.config ?: error("No configuration")
-                val gateway=io.github.ibudaoa.capture.AutomaticRunGateway(AccountSessionRuntime.session,config,
-                    state.value.executionRequirements ?: RunRuntimeRequirements())
+                val gateway=io.github.ibudaoa.capture.RunRecordReader(AccountSessionRuntime.session)
                 val body=gateway.record(context,ledger.expectedRecord())
                 val result=try { ledger.verifyRecord(body) } finally { body.fill(0) }
+                mutableState.update { it.copy(
+                    automaticFailureReason=ledger.failureReasonForDisplay(),
+                    automaticRun=it.automaticRun.copy(identityChecks=ledger.identityChecks(),problem="RECORD_${result.verdict.name}",
+                        serverPointCount=ledger.serverPointCount(),serverStatus=ledger.serverRecordStatus())) }
                 if(result.identityMatched && result.verdict in setOf(RunRecordVerdict.VALID,RunRecordVerdict.INVALID)) {
-                    state.value.pointCache?.takeIf { it.locked }?.let { store.releaseResolvedPointCache(it) }
+                    withContext(Dispatchers.IO) {
+                        ledger.archiveResolved()
+                    }
+                    store.pointPlanningStorage.first().cache?.takeIf { it.locked }?.let { store.releaseResolvedPointCache(it) }
                     withContext(Dispatchers.IO) { ledger.releaseResolved() };automaticJournalPending=false
                     mutableState.update { it.copy(session=SessionState(if(result.platformValid)io.github.ibudaoa.domain.SessionPhase.VALID else io.github.ibudaoa.domain.SessionPhase.INVALID),
                         automaticRun=it.automaticRun.copy(phase=if(result.platformValid)AutomaticRunPhase.VALID else AutomaticRunPhase.INVALID,recordBound=true,recordVerified=true)) }
@@ -618,7 +657,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     val grant=runGrant
                     if(grant==null || !AccountSessionRuntime.session.isCurrent(grant,Instant.now().epochSecond))
                         return@launch blockRunningPlan(RunningPlanProblem.ONLINE_EXPIRED)
-                    val route=updated?.route ?: return@launch blockRunningPlan(RunningPlanProblem.ROADS)
+                    val route=updated?.route ?: run {
+                        mutableState.update { it.copy(localPreview=updated, previewSummary=summary) }
+                        val reason = when (summary.routeProblem) {
+                            io.github.ibudaoa.roads.RoutePlanProblem.NO_OBSERVED_ROUTE -> RunningPlanProblem.ROAD_UNREACHABLE
+                            io.github.ibudaoa.roads.RoutePlanProblem.NO_DISTANCE_MARGIN -> RunningPlanProblem.ROAD_DISTANCE
+                            io.github.ibudaoa.roads.RoutePlanProblem.SEARCH_LIMIT -> RunningPlanProblem.ROAD_CALCULATION
+                            io.github.ibudaoa.roads.RoutePlanProblem.START_NOT_ON_ROAD -> RunningPlanProblem.ACCESS_ROUTE
+                            else -> RunningPlanProblem.ROADS
+                        }
+                        return@launch blockRunningPlan(reason)
+                    }
                     val (plan,planSummary)=RunningPlanRules.create(config,route,Instant.now(),ZoneId.of("Asia/Shanghai"))
                     preparedRunningPlan=plan;preparingRun=false
                     mutableState.update { it.copy(localPreview=updated,previewSummary=summary,runningPlanSummary=planSummary) }
@@ -970,6 +1019,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun exportConfig(uri: Uri) {
+        if (!state.value.diagnosticMode) return showMessage("请先在设置中开启调试模式。")
         val snapshot = state.value.config ?: return
         val automatic=state.value.automaticRun
         val requirements=state.value.executionRequirements
@@ -990,9 +1040,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         operation {
             val (graph, effectiveGapReport) = if (evidence != null && report?.phase != RoadBatchPhase.RUNNING) withContext(Dispatchers.Default) {
                 val metric = AmapDistance()
-                val base = runCatching { ObservedRoadGraphBuilder.build(snapshot, evidence, metric, gapEvidence, manualGaps) }.getOrNull()
-                val graph = if (base != null && reviewedDirections != null)
-                    runCatching { ReviewedRoadDirectionsBuilder.apply(base, reviewedDirections, manualGaps) }.getOrNull() else base
+                val base = runCatching { ObservedRoadGraphBuilder.build(snapshot, evidence, metric, gapEvidence, manualGaps, automatic = true) }.getOrNull()
+                val graph = base
                 val savedReport = gapEvidence?.let { saved -> runCatching {
                     val plan = RoadGapPlan.create(snapshot, evidence, metric)
                     check(saved.scope == plan.scope && saved.evidenceFingerprint == plan.evidenceFingerprint &&
