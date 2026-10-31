@@ -925,6 +925,10 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
                         val name = state.certificateFileName ?: "ibudaoa-连接证书.cer.crt"
                         Text("1.在手机设置里搜索并打开“安装证书”这个选项\n\n2.选择CA证书\n\n3.在Download文件夹里找到“$name”并安装",
                             style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    } else if (!certificateStep && capture.phase != CapturePhase.ERROR &&
+                        (capture.active || (!state.capturedConfig && state.certificateTrusted))) {
+                        Text("1.允许临时VPN\n\n2.在乐跑界面（就是那个大鸟的界面）停几秒\n\n3.回到本软件",
+                            style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                     } else {
                         Text(heading, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                         Spacer(Modifier.height(12.dp))
