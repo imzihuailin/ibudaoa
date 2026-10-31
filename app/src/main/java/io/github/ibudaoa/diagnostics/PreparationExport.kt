@@ -68,6 +68,7 @@ object PreparationExport {
             }) }
             runningPlan?.let { plan -> put("running_plan",buildJsonObject {
                 put("phase",plan.phase.name);plan.problem?.let { put("problem",it.name) }
+                plan.failureStage?.takeIf { it.matches(Regex("[A-Z_]{1,80}")) }?.let { put("failure_stage",it) }
                 put("was_generated",plan.distanceMeters!=null && plan.paceSecondsPerKm!=null && plan.durationSeconds!=null && plan.pointCount!=null)
                 plan.distanceMeters?.takeIf { it in 1..1_000_000 }?.let { put("distance_meters",it) }
                 plan.paceSecondsPerKm?.takeIf { it in 1..100_000 }?.let { put("pace_seconds_per_km",it) }

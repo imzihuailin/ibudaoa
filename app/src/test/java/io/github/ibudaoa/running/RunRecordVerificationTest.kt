@@ -7,6 +7,13 @@ import javax.crypto.spec.SecretKeySpec
 class RunRecordVerificationTest {
     private val expected=ExpectedRunRecord(45,123,6,1_700_000_000)
     private fun detail(status:Int=1,extra:String="")="""{"status":1,"data":{"id":45,"uid":123,"game_id":6,"start_time":1700000000,"type":1,"record_status":$status$extra}}""".toByteArray()
+    @Test fun `explicit automatic validity annotation is not a failure reason`() {
+        val result=RunRecordVerifier.inspect(detail(extra=",\"record_failed_reason\":\"自动确认有效\""),expected)
+        assertTrue(result.summary.platformValid)
+        assertFalse(result.summary.hasFailureReason)
+        assertNull(result.failureReason)
+        assertFalse(RunRecordVerifier.decode(detail(0,",\"record_failed_reason\":\"自动确认有效\""),expected).platformValid)
+    }
     @Test fun `only an exactly bound campus run detail with explicit validity establishes success`() {
         val result=RunRecordVerifier.decode(detail(),expected)
         assertTrue(result.identityMatched);assertTrue(result.platformValid)

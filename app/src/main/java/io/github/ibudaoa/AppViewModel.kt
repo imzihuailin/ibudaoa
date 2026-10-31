@@ -24,6 +24,11 @@ import io.github.ibudaoa.domain.PointSelectionCache
 import java.time.Instant
 import java.time.ZoneId
 import io.github.ibudaoa.capture.CaptureCertificates
+import io.github.ibudaoa.capture.CertificateSetupPhase
+import io.github.ibudaoa.capture.CertificateSetupGate
+import io.github.ibudaoa.capture.CertificateDownloads
+import io.github.ibudaoa.capture.CertificateDownloadRepository
+import io.github.ibudaoa.capture.needsCertificateSetup
 import io.github.ibudaoa.capture.CapturePurpose
 import io.github.ibudaoa.capture.CapturePhase
 import io.github.ibudaoa.capture.CaptureRuntime
@@ -61,7 +66,8 @@ data class AppState(
     val session: SessionState = SessionState(),
     val capturedConfig: Boolean = false,
     val certificateTrusted: Boolean = false,
-    val certificateExported: Boolean = false,
+    val certificateSetup: CertificateSetupPhase = CertificateSetupPhase.IDLE,
+    val certificateFileName: String? = null,
     val capture: CaptureState = CaptureState(),
     val accountSession:AccountSessionSnapshot=AccountSessionSnapshot(),
     val runningPlanSummary:RunningPlanSummary=RunningPlanSummary(),
@@ -97,7 +103,7 @@ data class AppState(
 private data class RoadComputation(val base: ObservedRoadGraph?, val graph: ObservedRoadGraph?,
     val route: RoutePlanResult?, val plan: RoadGapPlan?)
 
-enum class CaptureAction { EXPORT_CERTIFICATE, OPEN_SECURITY_SETTINGS, REQUEST_VPN, OPEN_OFFICIAL, STOP_CAPTURE }
+enum class CaptureAction { OPEN_SECURITY_SETTINGS, REQUEST_VPN, OPEN_OFFICIAL, STOP_CAPTURE }
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val store = DiagnosticStore(application)
@@ -111,7 +117,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var roadJob: Job? = null
     private var routeRefreshJob: Job? = null
     private var previewJob: Job? = null
-    private var awaitingCertificateInstallation = false
+    private val certificateGate = CertificateSetupGate()
+    private val certificateDownloads = CertificateDownloadRepository(CertificateDownloads(application))
+    private var certificateCheckJob: Job? = null
     private var requestedOpenGeneration = 0L
     private var requestedStopGeneration = 0L
     private var captureFlowActive = CaptureRuntime.state.value.active
@@ -265,9 +273,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.update { it.copy(localPreview = null) }
     }
 
+    private var runPreparationStage:String?=null
     private fun blockRunningPlan(problem:RunningPlanProblem) {
         preparingRun=false;runGrant=null;preparedRunningPlan=null
-        mutableState.update { it.copy(localPreview=null,runningPlanSummary=RunningPlanSummary(RunningPlanPhase.BLOCKED,problem)) }
+        mutableState.update { it.copy(localPreview=null,runningPlanSummary=RunningPlanSummary(RunningPlanPhase.BLOCKED,problem,failureStage=runPreparationStage)) }
         showMessage(problem.label)
     }
     fun prepareRunningPlan(lifecycle:Lifecycle) {
@@ -301,6 +310,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         if(initial.roadGraph?.edges?.isEmpty()==true && initial.gapPlan?.gaps?.isNotEmpty()==true)
             return blockRunningPlan(RunningPlanProblem.ROADS)
+        runPreparationStage="ACCOUNT_READ"
         preparingRun=true;preparedRunningPlan=null;runGrant=null
         mutableState.update { it.copy(busy=true,localPreview=null,runningPlanSummary=RunningPlanSummary(RunningPlanPhase.CHECKING)) }
         runPreparationJob=viewModelScope.launch {
@@ -317,12 +327,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val grant=AccountSessionRuntime.session.verifiedSchool(Instant.now().epochSecond)
                     ?: return@launch blockRunningPlan(RunningPlanProblem.ACCOUNT)
                 mutableState.update { it.copy(executionRequirements=grant.executionRequirements) }
+                runPreparationStage="CONFIG_COMPATIBILITY"
                 if(grant.config!=baseline) {
                     if(!OnlineConfigurationCompatibility.compatible(baseline,grant.config)) return@launch blockRunningPlan(RunningPlanProblem.CONFIGURATION_CHANGED)
                     mutableState.update { it.copy(runningPlanSummary=RunningPlanSummary(RunningPlanPhase.SYNCING)) }
+                runPreparationStage="CONFIG_STORAGE"
                     val committed=store.refreshVerified(grant.config,baseline,initial.connectionEpoch) {
                         AccountSessionRuntime.session.isCurrent(grant,Instant.now().epochSecond)
                     }
+                runPreparationStage="ROAD_SNAPSHOT"
                     val ready=withContext(Dispatchers.Default) { RunningRoadSnapshot.build(committed,grant.config,AmapDistance()) }
                     if(!AccountSessionRuntime.session.isCurrent(grant,Instant.now().epochSecond) ||
                         store.pointPlanningStorage.first()!=committed)
@@ -339,6 +352,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if(!AccountSessionRuntime.session.isCurrent(grant,Instant.now().epochSecond)) return@launch blockRunningPlan(RunningPlanProblem.ONLINE_EXPIRED)
                 AccountSessionRuntime.session.acknowledgeSchool(grant,Instant.now().epochSecond)
+                runPreparationStage="CONFIG_PUBLICATION"
                 val config=state.value.config ?: return@launch blockRunningPlan(RunningPlanProblem.CONFIGURATION_CHANGED)
                 if(config!=RunningRoadSnapshot.canonical(grant.config)) return@launch blockRunningPlan(RunningPlanProblem.CONFIGURATION_CHANGED)
                 val graph=state.value.roadGraph ?: return@launch blockRunningPlan(RunningPlanProblem.ROADS)
@@ -347,6 +361,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val zone=ZoneId.of("Asia/Shanghai")
                 RunningPlanRules.problem(config,Instant.now(),zone)?.let { return@launch blockRunningPlan(it) }
                 mutableState.update { it.copy(runningPlanSummary=RunningPlanSummary(RunningPlanPhase.WAITING_LOCATION)) }
+                runPreparationStage="LOCATION"
                 val located=withTimeout(20_000) { state.first { current -> current.displayFix?.let { fix ->
                     fix.accuracyMeters<=50 && SystemClock.elapsedRealtime()-fix.receivedElapsedMillis in 0..15_000
                 }==true } }
@@ -358,6 +373,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     it.scope.termId==policy.termId && it.scope.zoneId==policy.zoneId }?.copy(scope=policy.scope(graph.scope.connectionEpoch))
                     ?: state.value.previewPoints
                 mutableState.update { it.copy(runningPlanSummary=RunningPlanSummary(RunningPlanPhase.CONNECTING_ROUTE)) }
+                runPreparationStage="ACCESS_ROUTE"
                 val target=OriginRoadProposalBuilder.queryTarget(graph,located.displayFix!!.coordinate,AmapDistance())
                     ?: return@launch blockRunningPlan(RunningPlanProblem.ACCESS_ROUTE)
                 val access=if(target.gapMeters<=OriginRoadProposalBuilder.MAX_GAP_METERS)
@@ -366,6 +382,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     val paths=AmapWalkingRoadSource(getApplication()).probeAccess(target.origin,target.roadPoint,true,lifecycle)
                     OriginRoadProposalBuilder.routed(graph,target,paths,AmapDistance())
                 } ?: return@launch blockRunningPlan(RunningPlanProblem.ACCESS_ROUTE)
+                runPreparationStage="GRAPH_REVISION"
                 if(state.value.config!=config || state.value.roadGraph!==graph) return@launch blockRunningPlan(RunningPlanProblem.CONFIGURATION_CHANGED)
                 val result=withContext(Dispatchers.Default) { LocalRoutePreviewEngine.prepare(config,true,graph,state.value.displayFix,
                     cached,Instant.now(),SystemClock.elapsedRealtime(),zone,AmapDistance(),access) }
@@ -739,22 +756,38 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (state.value.busy || roadJob != null) return
         if (!state.value.capture.active) requestedCapturePurpose=purpose
         captureFlowActive = true
+        certificateCheckJob?.cancel()
+        val setupGeneration = certificateGate.begin()
         operation("准备连接未完成，请返回后重试。") {
             if (state.value.capture.active) {
                 if (state.value.capture.phase == CapturePhase.LISTENING) sendCaptureAction(CaptureAction.OPEN_OFFICIAL)
                 return@operation
             }
             if (purpose==CapturePurpose.CONFIG) store.acknowledgePreparation()
-            val trusted = withContext(Dispatchers.IO) { certificates.isInstalled() }
-            if (!captureFlowActive) return@operation
+            if (!certificateGate.accepts(setupGeneration) || !captureFlowActive) return@operation
+            mutableState.update { it.copy(certificateSetup = CertificateSetupPhase.CHECKING) }
+            val trusted = try { withContext(Dispatchers.IO) { certificates.isInstalled() } }
+            catch (error: CancellationException) { throw error }
+            catch (_: Exception) {
+                if (certificateGate.accepts(setupGeneration)) mutableState.update { it.copy(certificateSetup = CertificateSetupPhase.CHECK_FAILED) }
+                return@operation
+            }
+            if (!certificateGate.accepts(setupGeneration) || !captureFlowActive) return@operation
             mutableState.update { it.copy(certificateTrusted = trusted) }
-            when {
-                trusted -> sendCaptureAction(CaptureAction.REQUEST_VPN)
-                state.value.certificateExported -> {
-                    awaitingCertificateInstallation = true
-                    sendCaptureAction(CaptureAction.OPEN_SECURITY_SETTINGS)
+            if (trusted) {
+                mutableState.update { it.copy(certificateSetup = CertificateSetupPhase.INSTALLED) }
+                if (certificateGate.installed(setupGeneration)) sendCaptureAction(CaptureAction.REQUEST_VPN)
+            } else {
+                mutableState.update { it.copy(certificateSetup = CertificateSetupPhase.SAVING) }
+                val file = try { withContext(Dispatchers.IO) { certificateDownloads.ensure(certificates.root().encoded) } }
+                catch (error: CancellationException) { throw error }
+                catch (_: Exception) {
+                    if (certificateGate.accepts(setupGeneration)) mutableState.update { it.copy(certificateSetup = CertificateSetupPhase.SAVE_FAILED) }
+                    return@operation
                 }
-                else -> sendCaptureAction(CaptureAction.EXPORT_CERTIFICATE)
+                if (!certificateGate.accepts(setupGeneration) || !captureFlowActive) return@operation
+                mutableState.update { it.copy(certificateFileName = file.fileName, certificateSetup = CertificateSetupPhase.WAITING_INSTALL) }
+                if (certificateGate.waiting(setupGeneration)) sendCaptureAction(CaptureAction.OPEN_SECURITY_SETTINGS)
             }
         }
     }
@@ -763,6 +796,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val snapshot = state.value
         if (snapshot.busy || roadJob != null) return
         if (snapshot.capture.active) { requestCapture(snapshot.capture.purpose);return }
+        if (needsCertificateSetup(snapshot.certificateSetup, snapshot.capturedConfig, snapshot.certificateTrusted, snapshot.capture.active)) {
+            requestCapture(requestedCapturePurpose)
+            return
+        }
         if (!snapshot.manualGaps?.indices.isNullOrEmpty() || !snapshot.reviewedDirections?.reversible.isNullOrEmpty())
             return showMessage("已保存手动道路确认，暂不能重新核对道路。")
         if (!snapshot.capturedConfig || snapshot.captureRevision != DiagnosticStore.CURRENT_CAPTURE_REVISION) {
@@ -950,26 +987,37 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun exportCertificate(uri: Uri) = operation("证书未能保存，请重新选择保存位置。") {
-        if (!captureFlowActive) return@operation
-        withContext(Dispatchers.IO) {
-            val publicCertificate = certificates.root().encoded
-            getApplication<Application>().contentResolver.openOutputStream(uri, "wt")?.use { it.write(publicCertificate) }
-                ?: error("No output stream")
-        }
-        if (!captureFlowActive) return@operation
-        mutableState.update { it.copy(certificateExported = true) }
-        awaitingCertificateInstallation = true
-        messages.send("证书已保存，请在系统设置中选择“安装 CA 证书”，安装刚保存的 ibudaoa 证书。")
-        sendCaptureAction(CaptureAction.OPEN_SECURITY_SETTINGS)
+    fun certificateSettingsUnavailable() {
+        if (captureFlowActive) mutableState.update { it.copy(certificateSetup = CertificateSetupPhase.SETTINGS_UNAVAILABLE) }
     }
 
     fun refreshCertificateStatus() {
-        viewModelScope.launch {
-            val trusted = withContext(Dispatchers.IO) { runCatching { certificates.isInstalled() }.getOrDefault(false) }
-            mutableState.update { it.copy(certificateTrusted = trusted) }
-            if (captureFlowActive && trusted && awaitingCertificateInstallation && !state.value.capture.active) {
-                awaitingCertificateInstallation = false
+        if (state.value.busy || certificateCheckJob?.isActive == true) return
+        val generation = certificateGate.current()
+        val previousPhase = state.value.certificateSetup
+        if (previousPhase in setOf(CertificateSetupPhase.WAITING_INSTALL, CertificateSetupPhase.NOT_INSTALLED))
+            mutableState.update { it.copy(certificateSetup = CertificateSetupPhase.CHECKING) }
+        certificateCheckJob = viewModelScope.launch {
+            val trusted = try { withContext(Dispatchers.IO) { certificates.isInstalled() } }
+            catch (error: CancellationException) { throw error }
+            catch (_: Exception) {
+                if (generation == certificateGate.current()) mutableState.update { it.copy(certificateSetup = CertificateSetupPhase.CHECK_FAILED) }
+                return@launch
+            }
+            val file = if (!trusted) try {
+                withContext(Dispatchers.IO) { certificateDownloads.existing(certificates.root().encoded) }
+            } catch (error: CancellationException) { throw error }
+            catch (_: Exception) { null } else null
+            if (generation != certificateGate.current()) return@launch
+            val phase = when {
+                trusted -> CertificateSetupPhase.INSTALLED
+                previousPhase == CertificateSetupPhase.SETTINGS_UNAVAILABLE -> previousPhase
+                file != null && certificateGate.accepts(generation) -> CertificateSetupPhase.NOT_INSTALLED
+                file != null -> CertificateSetupPhase.WAITING_INSTALL
+                else -> CertificateSetupPhase.IDLE
+            }
+            mutableState.update { it.copy(certificateTrusted = trusted, certificateFileName = file?.fileName, certificateSetup = phase) }
+            if (captureFlowActive && !state.value.capture.active && certificateGate.returned(generation, trusted)) {
                 sendCaptureAction(CaptureAction.REQUEST_VPN)
             }
         }
@@ -981,7 +1029,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         roadJob?.cancel()
         captureFlowActive = false
         CaptureVpnService.stopOwned(getApplication())
-        awaitingCertificateInstallation = false
+        certificateGate.cancel()
+        certificateCheckJob?.cancel()
+        mutableState.update { it.copy(certificateSetup = if (it.certificateTrusted) CertificateSetupPhase.INSTALLED else CertificateSetupPhase.IDLE) }
         while (actions.tryReceive().isSuccess) Unit
     }
 

@@ -424,18 +424,32 @@ class DiagnosticStoreTest {
         store.setManualGap(plan,0,true);store.setAllReviewedDirections(batch.scope,plan.evidenceFingerprint)
         return store to cfg
     }
-    @Test fun `verified counter refresh rebases confirmed gaps directions and actual graph atomically`() = runBlocking {
+    @Test fun `verified counter refresh preserves geometry and retires legacy confirmations atomically`() = runBlocking {
         val (store,cfg)=onlineConfirmedStore();val old=store.pointPlanningStorage.first()
         val fresh=cfg.copy(config=kotlinx.serialization.json.JsonObject(cfg.config+mapOf("run_log_num" to kotlinx.serialization.json.JsonPrimitive(2))))
         store.refreshVerified(fresh,cfg,old.connectionEpoch) { true }
         val next=store.pointPlanningStorage.first()
         assertEquals(fresh,next.config);assertTrue(next.connectionEpoch>old.connectionEpoch)
-        assertEquals(setOf(0),next.manualGaps!!.indices)
-        assertEquals(setOf("a" to "b"),next.reviewedDirections!!.reversible)
-        val graph=ObservedRoadGraphBuilder.build(fresh,next.roadEvidence!!,io.github.ibudaoa.maps.AmapDistance(),next.gapEvidence,next.manualGaps)
-        assertEquals(2,ReviewedRoadDirectionsBuilder.apply(graph,next.reviewedDirections!!,next.manualGaps).edges.size)
-        assertEquals(next.roadEvidence!!.scope,next.reviewedDirections!!.scope)
+        assertNull(next.manualGaps)
+        assertNull(next.reviewedDirections)
+        val graph=ObservedRoadGraphBuilder.build(fresh,next.roadEvidence!!,io.github.ibudaoa.maps.AmapDistance(),next.gapEvidence,next.manualGaps,automatic=true)
+        assertEquals(2,graph.edges.size)
+        assertEquals(old.roadEvidence!!.legs,next.roadEvidence!!.legs)
         assertTrue(runCatching { store.setManualGap(RoadGapPlan.create(cfg,old.roadEvidence!!,io.github.ibudaoa.maps.AmapDistance()),0,false) }.isFailure)
+    }
+    @Test fun `obsolete manual gap index cannot block compatible online rules refresh`() = runBlocking {
+        val backend=MemoryStore();val store=DiagnosticStore(backend);val cfg=RoadFixture.config()
+        store.save(cfg,captured=true)
+        val batch=RoadBatchPlan.create(cfg,store.pointPlanningStorage.first().connectionEpoch)
+        val evidence=RoadEvidenceSnapshot(batch.scope,listOf(CandidateRoadEvidence("a","b",RoadFixture.leg())))
+        store.saveRoadCheck(RoadBatchReport(batch.scope,RoadBatchPhase.INTERRUPTED,batch.candidateCount,batch.requests.size,listOf(RoadLinkSummary("a","b"))),evidence)
+        backend.edit { it[stringPreferencesKey("private_manual_road_gaps_v1")]=ManualRoadGapsCodec.encode(ManualRoadGaps(RoadGapPlan.fingerprint(evidence),setOf(23))) }
+        val old=store.pointPlanningStorage.first()
+        val fresh=cfg.copy(config=kotlinx.serialization.json.JsonObject(cfg.config+("run_log_num" to kotlinx.serialization.json.JsonPrimitive(2))))
+        val next=store.refreshVerified(fresh,cfg,old.connectionEpoch) { true }
+        assertEquals(evidence.legs,next.roadEvidence!!.legs)
+        assertNull(next.manualGaps)
+        assertEquals(2,io.github.ibudaoa.running.RunningRoadSnapshot.build(next,fresh,io.github.ibudaoa.maps.AmapDistance()).graph.edges.size)
     }
     @Test fun `stale online authority and incompatible zone never overwrite reviewed campus`() = runBlocking {
         val (store,cfg)=onlineConfirmedStore();val before=store.pointPlanningStorage.first()
@@ -470,8 +484,8 @@ class DiagnosticStoreTest {
         val fresh=cfg.copy(config=kotlinx.serialization.json.JsonObject(cfg.config+mapOf("run_log_num" to kotlinx.serialization.json.JsonPrimitive(3))))
         store.refreshVerified(fresh,cfg,restored.connectionEpoch) { true }
         val next=store.pointPlanningStorage.first()
-        assertEquals(setOf(0),next.manualGaps!!.indices)
-        assertEquals(setOf("a" to "b"),next.reviewedDirections!!.reversible)
+        assertNull(next.manualGaps)
+        assertNull(next.reviewedDirections)
         assertTrue(runCatching { store.confirmAllRoadConnectionsAndDirections(plan) }.isFailure)
         assertEquals(next,store.pointPlanningStorage.first())
     }
@@ -498,9 +512,9 @@ class DiagnosticStoreTest {
         assertEquals(fresh,ready.storage.config)
         assertEquals(before.connectionEpoch+1,ready.graph.scope.connectionEpoch)
         assertEquals(2,ready.graph.edges.size)
-        assertEquals(1,ready.graph.manualConfirmationCount)
+        assertEquals(0,ready.graph.manualConfirmationCount)
         assertEquals(0,ready.graph.reviewedTwoWayRoadCount)
-        assertEquals(setOf(0),committed.manualGaps!!.indices)
+        assertNull(committed.manualGaps)
         assertEquals(committed.roadEvidence!!.scope,ready.graph.scope)
     }
 
@@ -525,8 +539,8 @@ class DiagnosticStoreTest {
         assertTrue(runCatching { store.refreshVerified(fresh,cfg,before.connectionEpoch) { ++calls<=2 } }.isFailure)
         val stored=store.pointPlanningStorage.first()
         assertEquals(fresh,stored.config)
-        assertEquals(setOf(0),stored.manualGaps!!.indices)
-        assertEquals(setOf("a" to "b"),stored.reviewedDirections!!.reversible)
+        assertNull(stored.manualGaps)
+        assertNull(stored.reviewedDirections)
     }
 
     private class MemoryStore : DataStore<Preferences> {

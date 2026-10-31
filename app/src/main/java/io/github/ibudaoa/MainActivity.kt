@@ -35,9 +35,6 @@ class MainActivity : ComponentActivity() {
     private val exportConnectionReport = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         uri?.let(model::exportConnectionReport)
     }
-    private val exportCertificate = registerForActivityResult(
-        ActivityResultContracts.CreateDocument("application/x-x509-ca-cert"),
-    ) { uri -> uri?.let(model::exportCertificate) }
     private val vpnPermission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == RESULT_OK) startCollector()
         else model.showMessage("未授予 VPN 连接权限，采集未启动。")
@@ -49,11 +46,11 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
                 model.captureActions.collect { action ->
+                    if (action != CaptureAction.STOP_CAPTURE && !model.captureRequested) return@collect
                     when (action) {
-                        CaptureAction.EXPORT_CERTIFICATE -> exportCertificate.launch("ibudaoa-diagnostics-ca.cer")
                         CaptureAction.OPEN_SECURITY_SETTINGS -> runCatching {
                             startActivity(Intent(Settings.ACTION_SECURITY_SETTINGS))
-                        }.onFailure { model.showMessage("请手动打开系统设置，搜索“CA 证书”，安装刚保存的证书。") }
+                        }.onFailure { model.certificateSettingsUnavailable() }
                         CaptureAction.REQUEST_VPN -> requestVpn()
                         CaptureAction.OPEN_OFFICIAL -> openOfficial()
                         CaptureAction.STOP_CAPTURE -> CaptureVpnService.stopOwned(this@MainActivity)

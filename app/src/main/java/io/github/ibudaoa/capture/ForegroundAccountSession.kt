@@ -271,8 +271,26 @@ internal class ForegroundAccountSession(private val clock:()->Long={System.nanoT
         var preparation=LivePreparationSnapshot(LivePreparationPhase.NEEDS_SETUP)
         var freshConfig:DiagnosticConfig?=null
         var runtimeRequirements=io.github.ibudaoa.running.RunRuntimeRequirements()
+        fun readPreparation() {
+                val response=exchange(AccountProtocol.request(working,ReadOnlyPolicy.BEFORE_RUN,currentTime(),nextNonce()))
+                preparation=try {
+                    val fresh=BeforeRunDecoder.decode(response)
+                    freshConfig=fresh
+                    runtimeRequirements=io.github.ibudaoa.running.RunRuntimeRequirements.inspect(BeforeRunDecoder.decodeSuccessfulData(response))
+                    val school=Json.parseToJsonElement(working.toString(Charsets.UTF_8)).jsonObject
+                        .getValue("parameters").jsonObject["school_id"]?.jsonPrimitive?.content
+                    LivePreparation.review(fresh,savedConfig,school,Instant.ofEpochSecond(currentTime()))
+                } finally { response.fill(0) }
+        }
         try {
             result=accountRead()
+            if(result.readAccepted && AccountProtocol.ready(working) && AccountProtocol.refreshState(working)!="UNVERIFIED") {
+                synchronized(this) { if(ticket!=generation || !foreground || revision!=credentialRevision) return }
+                try { readPreparation() }
+                catch(e:BeforeRunAccountException) {
+                    result=AccountReadResult(if(e.problem==CaptureProblem.ACCOUNT_CHANGED) AccountReadOutcome.ACCOUNT_CHANGED else AccountReadOutcome.ACCOUNT_EXPIRED)
+                }
+            }
             if(result.outcome in setOf(AccountReadOutcome.ACCOUNT_EXPIRED,AccountReadOutcome.ACCOUNT_CHANGED)) {
                 val canRefresh=AccountProtocol.ready(working) && AccountProtocol.hasRefresh(working) && AccountProtocol.refreshState(working)=="AVAILABLE"
                 if(canRefresh) {
@@ -325,15 +343,7 @@ internal class ForegroundAccountSession(private val clock:()->Long={System.nanoT
             }
             if(result.readAccepted && AccountProtocol.ready(working)) {
                 synchronized(this) { if(ticket!=generation || !foreground || revision!=credentialRevision) return }
-                val response=exchange(AccountProtocol.request(working,ReadOnlyPolicy.BEFORE_RUN,currentTime(),nextNonce()))
-                preparation=try {
-                    val fresh=BeforeRunDecoder.decode(response)
-                    freshConfig=fresh
-                    runtimeRequirements=io.github.ibudaoa.running.RunRuntimeRequirements.inspect(BeforeRunDecoder.decodeSuccessfulData(response))
-                    val school=Json.parseToJsonElement(working.toString(Charsets.UTF_8)).jsonObject
-                        .getValue("parameters").jsonObject["school_id"]?.jsonPrimitive?.content
-                    LivePreparation.review(fresh,savedConfig,school,Instant.ofEpochSecond(currentTime()))
-                } finally { response.fill(0) }
+                if(freshConfig==null) readPreparation()
             }
         } catch(e:BeforeRunAccountException) {
             result=AccountReadResult(if(e.problem==CaptureProblem.ACCOUNT_CHANGED)AccountReadOutcome.ACCOUNT_CHANGED else AccountReadOutcome.ACCOUNT_EXPIRED)

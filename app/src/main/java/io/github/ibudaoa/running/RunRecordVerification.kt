@@ -40,9 +40,11 @@ internal object RunRecordVerifier {
             }
             if (checks.any { (key, check) -> check != RecordFieldCheck.MATCH && !(key == "id" && check == RecordFieldCheck.MISSING) })
                 return InspectedRunRecord(RunRecordVerification(RunRecordVerdict.MISMATCH, identityChecks=checks),null)
-            val reason=(data["record_failed_reason"] as? JsonPrimitive)?.takeIf { it.isString }
-                ?.content?.isNotBlank()==true
             val status=number("record_status")
+            val rawReason=(data["record_failed_reason"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+            // Observed valid record: the server reuses this field for a success annotation.
+            val confirmedSuccess=status==1L && rawReason?.trim()=="自动确认有效"
+            val reason=!confirmedSuccess && rawReason?.isNotBlank()==true
             val verdict=when(status) {
                 1L -> if(reason)RunRecordVerdict.UNKNOWN else RunRecordVerdict.VALID
                 0L -> if(reason)RunRecordVerdict.INVALID else RunRecordVerdict.UNKNOWN
@@ -50,8 +52,8 @@ internal object RunRecordVerifier {
                 10L -> RunRecordVerdict.PENDING // Official adapter marks this separately as an upload anomaly.
                 else -> RunRecordVerdict.UNKNOWN
             }
-            val text=(data["record_failed_reason"] as? JsonPrimitive)?.takeIf { it.isString }?.content
-                ?.takeIf { it.isNotBlank() }?.let { raw ->
+            val text=rawReason
+                ?.takeIf { reason && it.isNotBlank() }?.let { raw ->
                     if(raw.length>500 || Regex("https?://|[0-9]{6,}|[a-fA-F0-9]{24,}|token|cookie|authorization",RegexOption.IGNORE_CASE).containsMatchIn(raw))
                         "平台原因包含敏感内容，已隐藏"
                     else raw.map { if(it.isISOControl()) ' ' else it }.joinToString("").trim()

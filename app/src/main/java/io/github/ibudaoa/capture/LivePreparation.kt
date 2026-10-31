@@ -14,6 +14,7 @@ data class LivePreparationSnapshot(
     val issues:Set<ConfigurationIssue> = emptySet(),
     val calendar:CalendarReview?=null,
     val changedFields:Set<String> = emptySet(),
+    val changedStructureFields:Set<String> = emptySet(),
 ) {
     val label:String get()=when(phase) {
         LivePreparationPhase.NOT_CHECKED -> "在线跑前条件尚未核对"
@@ -43,7 +44,10 @@ internal object LivePreparation {
         if(saved?.faceConfigShape!=fresh.faceConfigShape) changed.add(PreparationSection.RULES)
         return LivePreparationSnapshot(if(changed.isEmpty())LivePreparationPhase.MATCHED else LivePreparationPhase.CHANGED,
             changed,ConfigurationReviewer.review(fresh).issues,
-            CalendarReviewer.review(fresh,now,ZoneId.of("Asia/Shanghai")),changedFields.toSet())
+            CalendarReviewer.review(fresh,now,ZoneId.of("Asia/Shanghai")),changedFields.toSet(),
+            if(saved?.structure==null) emptySet() else ((saved.structure.fieldTypes.keys+fresh.structure?.fieldTypes.orEmpty().keys).filter {
+                saved?.structure?.fieldTypes?.get(it)!=fresh.structure?.fieldTypes?.get(it)
+            }).map { it.substringBefore('.').substringBefore('[') }.toSet())
     }
     fun report(snapshot:LivePreparationSnapshot)=buildJsonObject {
         put("phase",snapshot.phase.name)
@@ -51,6 +55,7 @@ internal object LivePreparation {
         val privateKey=Regex("token|cookie|authorization|password|student|avatar|device|photo|face_img|(^|_)uid($|_)|user_id",RegexOption.IGNORE_CASE)
         put("changed_fields",JsonArray(snapshot.changedFields.filter { it.matches(Regex("[a-zA-Z][a-zA-Z0-9_]{0,63}")) && !privateKey.containsMatchIn(it) }
             .sorted().take(128).map { JsonPrimitive(it) }))
+        put("changed_structure_fields",JsonArray(snapshot.changedStructureFields.filter { it.matches(Regex("[a-zA-Z][a-zA-Z0-9_]{0,63}")) && !privateKey.containsMatchIn(it) }.sorted().take(128).map { JsonPrimitive(it) }))
         put("configuration_issues",JsonArray(snapshot.issues.sortedBy { it.name }.map { JsonPrimitive(it.name) }))
         put("platform_task_state_verified",false);put("can_start",false)
         snapshot.calendar?.let { c ->

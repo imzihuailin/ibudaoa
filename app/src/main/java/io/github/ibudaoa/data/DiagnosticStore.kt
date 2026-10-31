@@ -117,10 +117,10 @@ class DiagnosticStore internal constructor(private val store: DataStore<Preferen
             val oldReport = if (sameCapturedConfig) it.readRoadReport(previous) else null
             val oldRoads = if (sameCapturedConfig) it.readRoadEvidence(previous, oldReport) else null
             val oldGaps = if (sameCapturedConfig) it.readGapEvidence(oldRoads) else null
-            val oldManual = if (sameCapturedConfig) it.readManualGaps(oldRoads) else null
-            val oldDirections = if (sameCapturedConfig) it.readDirections(oldRoads) else null
-            check(it[reviewedDirectionsKey] == null || oldDirections != null) { "已有道路方向确认无法核对" }
-            check(it[manualGapsKey] == null || oldManual != null) { "已有道路确认无法核对，原有数据已保留" }
+            val oldManual = if (sameCapturedConfig && online == null) it.readManualGaps(oldRoads) else null
+            val oldDirections = if (sameCapturedConfig && online == null) it.readDirections(oldRoads) else null
+            check(online != null || it[reviewedDirectionsKey] == null || oldDirections != null) { "已有道路方向确认无法核对" }
+            check(online != null || it[manualGapsKey] == null || oldManual != null) { "已有道路确认无法核对，原有数据已保留" }
             val nextEpoch = nextEpoch(it.epoch())
             val nextPlan = if (oldReport != null) runCatching { RoadBatchPlan.create(config, nextEpoch) }.getOrNull() else null
             it[epochKey] = nextEpoch

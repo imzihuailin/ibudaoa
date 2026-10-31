@@ -29,7 +29,7 @@ enum class RunningPlanProblem(val label:String) {
 }
 data class RunningPlanSummary(val phase:RunningPlanPhase=RunningPlanPhase.IDLE,val problem:RunningPlanProblem?=null,
     val distanceMeters:Int?=null,val paceSecondsPerKm:Int?=null,val durationSeconds:Int?=null,val pointCount:Int?=null,
-    val accessDistanceMeters:Int?=null)
+    val accessDistanceMeters:Int?=null,val failureStage:String?=null)
 internal class RunningPlan(val route:FixedPointRoute,val targetPaceSecondsPerKm:Int,val durationSeconds:Int)
 object RunningPlanRules {
     fun problem(config:DiagnosticConfig,now:Instant,zone:ZoneId):RunningPlanProblem? {

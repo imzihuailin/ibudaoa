@@ -130,6 +130,21 @@ class AccountMaintenanceTest {
         assertEquals(AccountRefreshOutcome.VERIFIED,s.refreshOutcome);assertEquals(1,s.refreshAttempts)
         assertEquals(LivePreparationPhase.MATCHED,s.preparation.phase)
     }
+    @Test fun `expired preparation renews even when profile still accepts login`() {
+        val store=MaintenanceFixture.Store();val session=f.session(store);var preparations=0
+        val c=MaintenanceFixture.Connection { request -> when(request.target) {
+            ReadOnlyPolicy.USER_PROFILE -> f.success
+            ReadOnlyPolicy.BEFORE_RUN -> if(preparations++==0) f.expired else f.fresh()
+            AccountProtocol.REFRESH -> f.rotated
+            else -> error("Unexpected endpoint")
+        } }
+        session.read(c,1793000100,654321,DiagnosticCodec.decode(f.config))
+        assertEquals(1,c.paths.count { it==AccountProtocol.REFRESH })
+        assertEquals(2,preparations)
+        assertEquals(AccountSessionPhase.READY,session.state.value.phase)
+        assertEquals(AccountRefreshOutcome.VERIFIED,session.state.value.refreshOutcome)
+        assertNotNull(session.verifiedSchool(1793000100))
+    }
     @Test fun `valid login skips refresh and reads online config without replacing cached data`() {
         val store=MaintenanceFixture.Store();val s=f.session(store)
         val cached=DiagnosticCodec.decode(f.config)

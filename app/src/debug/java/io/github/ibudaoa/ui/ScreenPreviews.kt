@@ -20,6 +20,7 @@ import io.github.ibudaoa.AppState
 import io.github.ibudaoa.capture.AccountProfilePreview
 import io.github.ibudaoa.capture.AccountSessionPhase
 import io.github.ibudaoa.capture.AccountSessionSnapshot
+import io.github.ibudaoa.capture.CertificateSetupPhase
 import io.github.ibudaoa.capture.CapturePhase
 import io.github.ibudaoa.capture.CaptureState
 import io.github.ibudaoa.data.DiagnosticStore
@@ -32,10 +33,20 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 /** Fixed, invented data: never read device storage, construct a ViewModel or use a gateway. */
-private enum class PreviewScene { WARMUP, RUN_READY, RUNNING, PAUSED, SCHOOL, SETTINGS, SETTINGS_DISCONNECTED }
+private enum class PreviewScene { WARMUP, CERTIFICATE_READY, CERTIFICATE_NOT_INSTALLED, CERTIFICATE_SAVE_FAILED, CERTIFICATE_CHECK_FAILED, CERTIFICATE_SETTINGS_FAILED, RUN_READY, RUNNING, PAUSED, SCHOOL, SETTINGS, SETTINGS_DISCONNECTED }
 
 private fun sampleState(scene: PreviewScene): AppState {
     if (scene == PreviewScene.WARMUP || scene == PreviewScene.SETTINGS_DISCONNECTED) return AppState(loaded = true)
+    val certificatePhase = when (scene) {
+        PreviewScene.CERTIFICATE_READY -> CertificateSetupPhase.WAITING_INSTALL
+        PreviewScene.CERTIFICATE_NOT_INSTALLED -> CertificateSetupPhase.NOT_INSTALLED
+        PreviewScene.CERTIFICATE_SAVE_FAILED -> CertificateSetupPhase.SAVE_FAILED
+        PreviewScene.CERTIFICATE_CHECK_FAILED -> CertificateSetupPhase.CHECK_FAILED
+        PreviewScene.CERTIFICATE_SETTINGS_FAILED -> CertificateSetupPhase.SETTINGS_UNAVAILABLE
+        else -> null
+    }
+    if (certificatePhase != null) return AppState(loaded = true, certificateSetup = certificatePhase,
+        certificateFileName = if (certificatePhase in setOf(CertificateSetupPhase.WAITING_INSTALL, CertificateSetupPhase.NOT_INSTALLED, CertificateSetupPhase.SETTINGS_UNAVAILABLE)) "ibudaoa-连接证书.cer" else null)
     val config = DiagnosticConfig(buildJsonObject {
         put("school_name", "示意大学")
         put("run_zone_name", "示意校区")
@@ -67,6 +78,11 @@ private fun sampleState(scene: PreviewScene): AppState {
 private annotation class UiDevices
 
 @UiDevices @Composable private fun WarmupPreview() = ScreenPreview(PreviewScene.WARMUP)
+@UiDevices @Composable private fun CertificateReadyPreview() = ScreenPreview(PreviewScene.CERTIFICATE_READY)
+@UiDevices @Composable private fun CertificateNotInstalledPreview() = ScreenPreview(PreviewScene.CERTIFICATE_NOT_INSTALLED)
+@UiDevices @Composable private fun CertificateSaveFailedPreview() = ScreenPreview(PreviewScene.CERTIFICATE_SAVE_FAILED)
+@UiDevices @Composable private fun CertificateCheckFailedPreview() = ScreenPreview(PreviewScene.CERTIFICATE_CHECK_FAILED)
+@UiDevices @Composable private fun CertificateSettingsFailedPreview() = ScreenPreview(PreviewScene.CERTIFICATE_SETTINGS_FAILED)
 @UiDevices @Composable private fun RunReadyPreview() = ScreenPreview(PreviewScene.RUN_READY)
 @UiDevices @Composable private fun RunningPreview() = ScreenPreview(PreviewScene.RUNNING)
 @UiDevices @Composable private fun PausedPreview() = ScreenPreview(PreviewScene.PAUSED)
@@ -99,7 +115,7 @@ private fun ScreenPreview(scene: PreviewScene) {
                 }
                 Text("开发预览 · 全部数据为示意", Modifier.align(Alignment.Center).padding(12.dp),
                     style = MaterialTheme.typography.labelSmall)
-                if (scene == PreviewScene.WARMUP) {
+                if (scene == PreviewScene.WARMUP || scene.name.startsWith("CERTIFICATE_")) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         WarmupDialog(state, {}, {})
                     }

@@ -35,6 +35,13 @@ class RunningPlanTest {
         val pending=(LocalRoutePreviewEngine.prepare(cfg,true,graph,fix,null,now,1001,zone,metric) as PreviewPreparation.Ready).preview
         return LocalRoutePreviewEngine.confirm(cfg,true,graph,pending,fix,now,1002,zone,metric).first!!.route!!
     }
+    @Test fun `comparison uses persisted structure projection for nested arrays`() {
+        val saved=io.github.ibudaoa.diagnostics.DiagnosticCodec.decode("""{"school_id":1,"run_zone_id":3,"run_face_verify_config":{}}""")
+        val fresh=saved.copy(structure=io.github.ibudaoa.diagnostics.ConfigStructure(mapOf("run_zone_latlng[][]" to "number"),emptyList()))
+        val persisted=RunningRoadSnapshot.canonical(fresh)
+        assertTrue(OnlineConfigurationCompatibility.compatible(persisted,fresh))
+        assertFalse(OnlineConfigurationCompatibility.compatible(persisted,fresh.copy(config=kotlinx.serialization.json.JsonObject(fresh.config+("run_zone_id" to kotlinx.serialization.json.JsonPrimitive(4))))))
+    }
     @Test fun `full local route produces dynamic fast side pace and sufficient duration margin`() {
         val route=draft();val (plan,summary)=RunningPlanRules.create(config,route,now,zone)
         assertNotNull(plan);assertEquals(RunningPlanPhase.PLANNED,summary.phase)
@@ -86,6 +93,18 @@ class RunningPlanTest {
         assertFalse(OnlineConfigurationCompatibility.compatible(config,changed("run_zone_id",JsonPrimitive(4))))
         assertFalse(OnlineConfigurationCompatibility.compatible(config,changed("is_check_shumeng",JsonPrimitive(1))))
         assertFalse(OnlineConfigurationCompatibility.compatible(config,changed("run_line_info",JsonObject(emptyMap()))))
+    }
+    @Test fun `daily response metadata shapes never invalidate persisted campus roads`() {
+        val old=config.copy(structure=io.github.ibudaoa.diagnostics.ConfigStructure(mapOf(
+            "run_notes" to "array", "run_notes[]" to "string", "sports_data" to "array",
+            "weekData.list" to "array", "run_line_info.point_list[].cover_url" to "string",
+            "is_check_shumeng" to "number"),emptyList()))
+        val fresh=changed("run_log_num",JsonPrimitive(2)).copy(structure=io.github.ibudaoa.diagnostics.ConfigStructure(mapOf(
+            "run_notes" to "array", "sports_data" to "object", "sports_data.distance" to "number",
+            "run_line_info.point_list[].cover_url" to "null", "is_check_shumeng" to "number"),emptyList()))
+        assertTrue(OnlineConfigurationCompatibility.compatible(old,fresh))
+        assertFalse(OnlineConfigurationCompatibility.compatible(old,fresh.copy(structure=fresh.structure!!.copy(
+            fieldTypes=fresh.structure!!.fieldTypes+("is_check_shumeng" to "object")))))
     }
     @Test fun `school metadata update does not authorize zone point or verification changes`() {
         val fresh=changed("school_auth_num",JsonPrimitive(202))
