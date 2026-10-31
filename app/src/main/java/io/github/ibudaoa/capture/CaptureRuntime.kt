@@ -60,5 +60,5 @@ object CaptureRuntime {
 
 /** Returning from the official app ends collection even when the optional materials were incomplete. */
 object CaptureReturnPolicy {
-    fun shouldRelease(state:CaptureState):Boolean = state.officialOpened && state.phase!=CapturePhase.IDLE
+    fun shouldRelease(state:CaptureState):Boolean = state.officialOpened && state.active
 }

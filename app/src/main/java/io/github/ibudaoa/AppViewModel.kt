@@ -742,6 +742,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             withContext(Dispatchers.IO) { AccountSessionRuntime.initialize(getApplication()) }
             var remaining=100
             while(accountForeground && state.value.busy && remaining-->0) delay(50)
+            // An explicit connection can be awaiting system VPN consent before the service
+            // publishes STARTING. Automatic account verification must not stop that start.
+            if (captureFlowActive && state.value.capture.phase != CapturePhase.CAPTURED) return@launch
             val account=AccountSessionRuntime.session.state.value
             if(accountForeground && !state.value.capture.active && (account.phase==io.github.ibudaoa.capture.AccountSessionPhase.RESTORED ||
                 account.phase==io.github.ibudaoa.capture.AccountSessionPhase.READY && account.lastRead==null)) verifyAccountSession()

@@ -1,6 +1,7 @@
 package io.github.ibudaoa.capture
 
 import android.app.Notification
+import android.util.Log
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -51,27 +52,34 @@ class CaptureVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if(destroyed) { stopSelf();return START_NOT_STICKY }
         if (intent?.action == ACTION_STOP) {
             if (intent.getLongExtra("generation", generation) == generation) stopCapture()
             return START_NOT_STICKY
         }
         if (intent?.action != ACTION_START) { stopSelf(); return START_NOT_STICKY }
-        if (generation != 0L) return START_NOT_STICKY
-        purpose=when {
+        if (generation == 0L && !destroyed) purpose=when {
             intent.getBooleanExtra("account_session",false) -> CapturePurpose.ACCOUNT_SESSION
             intent.getBooleanExtra("account_read_check",false) -> CapturePurpose.ACCOUNT_READ_CHECK
             else -> CapturePurpose.CONFIG
         }
-        running=true
-        if(purpose==CapturePurpose.ACCOUNT_SESSION) sessionTicket=AccountSessionRuntime.session.begin()
-        generation = CaptureRuntime.begin(purpose)
+        Log.i("CaptureStartup", "start_requested")
         try {
             val notification = notification()
             if (Build.VERSION.SDK_INT >= 34) {
                 startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE)
             } else startForeground(NOTIFICATION_ID, notification)
-        } catch (_: Exception) { fail(CaptureProblem.VPN); return START_NOT_STICKY }
+        } catch (_: Exception) {
+            Log.w("CaptureStartup", "foreground_failed")
+            if (generation == 0L) generation = CaptureRuntime.begin(purpose)
+            fail(CaptureProblem.VPN); return START_NOT_STICKY
+        }
+        Log.i("CaptureStartup", "foreground_ready")
+        // A late start may reach an instance already being torn down. Fulfil the foreground
+        // contract before stopping, and never establish a replacement connection from it.
+        if (destroyed) { stopSelf(); return START_NOT_STICKY }
+        if (generation != 0L) return START_NOT_STICKY
+        running=true
+        generation = CaptureRuntime.begin(purpose)
         handler.postDelayed(timeout, 120_000)
         scope.launch { startCollector() }
         return START_NOT_STICKY
@@ -80,6 +88,14 @@ class CaptureVpnService : VpnService() {
     private fun startCollector() {
         try {
             AccountSessionRuntime.initialize(this)
+            if (destroyed) return
+            if (purpose == CapturePurpose.ACCOUNT_SESSION) {
+                synchronized(resourceLock) {
+                    if (destroyed) return
+                    sessionTicket = AccountSessionRuntime.session.begin()
+                }
+            }
+            Log.i("CaptureStartup", "initializing")
             val certificates = CaptureCertificates(this)
             if (!certificates.isInstalled()) { fail(CaptureProblem.CERTIFICATE); return }
             val context = certificates.serverContext()
@@ -174,6 +190,7 @@ class CaptureVpnService : VpnService() {
                     finally { buffer.fill(0) }
                 }
             }
+            Log.i("CaptureStartup", "collector_ready")
             CaptureRuntime.update(generation) { it.copy(phase = CapturePhase.LISTENING,
                 message = if (purpose!=CapturePurpose.CONFIG)
                     if(purpose==CapturePurpose.ACCOUNT_SESSION) "请在官方应用先打开“我的”，再进入校园跑准备页后返回；不要点击开始。"
@@ -184,6 +201,7 @@ class CaptureVpnService : VpnService() {
     }
 
     private fun fail(problem: CaptureProblem) {
+        Log.w("CaptureStartup", "failed_${problem.name}")
         CaptureRuntime.update(generation) { it.copy(phase = CapturePhase.ERROR, problem = problem, message = problem.userMessage) }
         handler.post { stopCapture() }
     }
@@ -212,6 +230,7 @@ class CaptureVpnService : VpnService() {
         val resources=synchronized(resourceLock) {
             if(destroyed)return
             destroyed=true
+            Log.i("CaptureStartup", "released")
             val owned=Triple(tun,proxy,drainThread)
             tun=null;proxy=null;drainThread=null
             owned
