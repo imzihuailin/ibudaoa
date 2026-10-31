@@ -27,7 +27,7 @@ class PreparationStepTest {
     @Test fun `running never duplicates requests and interrupted only retries on user continue`() {
         assertEquals(PreparationStep.WAIT, next(phase = RoadBatchPhase.RUNNING))
         assertEquals(PreparationStep.WAIT, next(busy = true))
-        assertEquals(PreparationStep.CHECK_ROADS, next(phase = RoadBatchPhase.INTERRUPTED))
+        assertEquals(PreparationStep.RETRY, next(phase = RoadBatchPhase.INTERRUPTED))
     }
     @Test fun `old road review repeats roads without repeating the fresh configuration capture`() {
         assertEquals(PreparationStep.CHECK_ROADS, PreparationStepResolver.next(true, 1, 1, false,
@@ -36,8 +36,17 @@ class PreparationStepTest {
             true, true, RoadBatchPhase.COMPLETE, false, 2))
     }
 
-    @Test fun `completed or failed check exports diagnostics instead of starting a run or looping`() {
-        assertEquals(PreparationStep.EXPORT_RESULT, next(phase = RoadBatchPhase.COMPLETE))
-        assertEquals(PreparationStep.EXPORT_RESULT, next(phase = RoadBatchPhase.FAILED))
+    @Test fun `incomplete or failed check requires explicit retry instead of export or automatic loop`() {
+        assertEquals(PreparationStep.RETRY, next(phase = RoadBatchPhase.COMPLETE))
+        assertEquals(PreparationStep.RETRY, next(phase = RoadBatchPhase.FAILED))
     }
+    @Test fun `only available saved roads allow completion after prerequisites`() {
+        assertEquals(PreparationStep.READY, PreparationStepResolver.next(true, 1, 1, false,
+            true, true, RoadBatchPhase.COMPLETE, false, roadsReady = true))
+        assertEquals(PreparationStep.WAIT, PreparationStepResolver.next(true, 1, 1, false,
+            true, true, RoadBatchPhase.COMPLETE, true, roadsReady = true))
+        assertEquals(PreparationStep.MAP_CONSENT, PreparationStepResolver.next(true, 1, 1, false,
+            true, false, RoadBatchPhase.COMPLETE, false, roadsReady = true))
+    }
+
 }

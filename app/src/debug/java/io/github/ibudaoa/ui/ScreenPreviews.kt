@@ -23,6 +23,8 @@ import io.github.ibudaoa.capture.AccountSessionSnapshot
 import io.github.ibudaoa.capture.CertificateSetupPhase
 import io.github.ibudaoa.capture.CapturePhase
 import io.github.ibudaoa.capture.CaptureState
+import io.github.ibudaoa.roads.*
+import io.github.ibudaoa.diagnostics.DiagnosticCodec
 import io.github.ibudaoa.data.DiagnosticStore
 import io.github.ibudaoa.diagnostics.DiagnosticConfig
 import io.github.ibudaoa.running.AutomaticRunPhase
@@ -33,7 +35,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 /** Fixed, invented data: never read device storage, construct a ViewModel or use a gateway. */
-private enum class PreviewScene { WARMUP, CERTIFICATE_READY, CERTIFICATE_NOT_INSTALLED, CERTIFICATE_SAVE_FAILED, CERTIFICATE_CHECK_FAILED, RUN_READY, RUNNING, PAUSED, SCHOOL, SETTINGS, SETTINGS_DISCONNECTED }
+private enum class PreviewScene { WARMUP, PREPARATION_RUNNING, PREPARATION_READY, PREPARATION_FAILED, PREPARATION_INTERRUPTED, CERTIFICATE_READY, CERTIFICATE_NOT_INSTALLED, CERTIFICATE_SAVE_FAILED, CERTIFICATE_CHECK_FAILED, RUN_READY, RUNNING, PAUSED, SCHOOL, SETTINGS, SETTINGS_DISCONNECTED }
 
 private fun sampleState(scene: PreviewScene): AppState {
     if (scene == PreviewScene.WARMUP || scene == PreviewScene.SETTINGS_DISCONNECTED) return AppState(loaded = true)
@@ -46,6 +48,26 @@ private fun sampleState(scene: PreviewScene): AppState {
     }
     if (certificatePhase != null) return AppState(loaded = true, certificateSetup = certificatePhase,
         certificateFileName = if (certificatePhase in setOf(CertificateSetupPhase.WAITING_INSTALL, CertificateSetupPhase.NOT_INSTALLED)) "ibudaoa-连接证书.cer.crt" else null)
+    if (scene.name.startsWith("PREPARATION_")) {
+        val demoConfig = DiagnosticCodec.decode("""{"school_id":1,"term_id":1,"run_zone_id":1,
+            "run_line_info":{"point_list":[
+            {"id":"a","jingwei":"30.0,114.0","is_online":1,"type":2,"point_type":1},
+            {"id":"b","jingwei":"30.001,114.0","is_online":1,"type":2,"point_type":1}]}}""")
+        val plan = RoadBatchPlan.create(demoConfig, 1)
+        val phase = when (scene) {
+            PreviewScene.PREPARATION_READY -> RoadBatchPhase.COMPLETE
+            PreviewScene.PREPARATION_FAILED -> RoadBatchPhase.FAILED
+            PreviewScene.PREPARATION_INTERRUPTED -> RoadBatchPhase.INTERRUPTED
+            else -> RoadBatchPhase.RUNNING
+        }
+        return AppState(loaded=true, capturedConfig=true, certificateTrusted=true, mapConsent=true,
+            config=demoConfig, connectionEpoch=1, captureRevision=DiagnosticStore.CURRENT_CAPTURE_REVISION,
+            busy=phase==RoadBatchPhase.RUNNING,
+            roadReport=RoadBatchReport(plan.scope, phase, plan.candidateCount, plan.requests.size,
+                if(phase==RoadBatchPhase.COMPLETE) plan.requests.map { RoadLinkSummary(it.fromId,it.toId) } else emptyList()),
+            roadEvidence=if(phase==RoadBatchPhase.COMPLETE) RoadEvidenceSnapshot(plan.scope, plan.requests.map {
+                CandidateRoadEvidence(it.fromId,it.toId,WalkingLeg(100.0,listOf(listOf(it.from,it.to)))) }) else null)
+    }
     val config = DiagnosticConfig(buildJsonObject {
         put("school_name", "示意大学")
         put("run_zone_name", "示意校区")
@@ -76,6 +98,10 @@ private fun sampleState(scene: PreviewScene): AppState {
 @Preview(name = "深色", widthDp = 412, heightDp = 915, uiMode = Configuration.UI_MODE_NIGHT_YES, showSystemUi = true)
 private annotation class UiDevices
 
+@UiDevices @Composable private fun PreparationRunningPreview() = ScreenPreview(PreviewScene.PREPARATION_RUNNING)
+@UiDevices @Composable private fun PreparationReadyPreview() = ScreenPreview(PreviewScene.PREPARATION_READY)
+@UiDevices @Composable private fun PreparationFailedPreview() = ScreenPreview(PreviewScene.PREPARATION_FAILED)
+@UiDevices @Composable private fun PreparationInterruptedPreview() = ScreenPreview(PreviewScene.PREPARATION_INTERRUPTED)
 @UiDevices @Composable private fun WarmupPreview() = ScreenPreview(PreviewScene.WARMUP)
 @UiDevices @Composable private fun CertificateReadyPreview() = ScreenPreview(PreviewScene.CERTIFICATE_READY)
 @UiDevices @Composable private fun CertificateNotInstalledPreview() = ScreenPreview(PreviewScene.CERTIFICATE_NOT_INSTALLED)
@@ -113,7 +139,7 @@ private fun ScreenPreview(scene: PreviewScene) {
                 }
                 Text("开发预览 · 全部数据为示意", Modifier.align(Alignment.Center).padding(12.dp),
                     style = MaterialTheme.typography.labelSmall)
-                if (scene == PreviewScene.WARMUP || scene.name.startsWith("CERTIFICATE_")) {
+                if (scene == PreviewScene.WARMUP || scene.name.startsWith("CERTIFICATE_") || scene.name.startsWith("PREPARATION_")) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         WarmupDialog(state, {}, {})
                     }

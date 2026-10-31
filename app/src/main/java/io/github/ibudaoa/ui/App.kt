@@ -82,6 +82,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import io.github.ibudaoa.preparationRoadReport
+import io.github.ibudaoa.preparationRoadsReady
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.currentStateAsState
 import io.github.ibudaoa.AppState
 import io.github.ibudaoa.capture.needsCertificateSetup
 import io.github.ibudaoa.capture.CertificateSetupPhase
@@ -156,7 +161,27 @@ fun IbudaoaApp(
     val uriHandler = LocalUriHandler.current
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(events) { events.collect { snackbar.showSnackbar(it) } }
-    LaunchedEffect(state.loaded) { if(state.loaded && state.capturedConfig) showWarmup=false }
+    LaunchedEffect(state.loaded) { if(state.loaded && state.preparationRoadsReady) showWarmup=false }
+    val foreground = LocalLifecycleOwner.current.lifecycle.currentStateAsState().value.isAtLeast(Lifecycle.State.RESUMED)
+    var attemptedRoadScope by rememberSaveable { mutableStateOf<String?>(null) }
+    val roadScopeKey = "${state.connectionEpoch}:${state.config.hashCode()}"
+    val automaticStep = PreparationStepResolver.next(state.capturedConfig, state.captureRevision,
+        DiagnosticStore.CURRENT_CAPTURE_REVISION, state.capture.active, BuildConfig.MAP_KEY_CONFIGURED,
+        state.mapConsent, state.preparationRoadReport?.phase, state.busy,
+        state.preparationRoadReport?.reviewRevision ?: io.github.ibudaoa.roads.RoadBatchReport.CURRENT_REVIEW_REVISION,
+        state.preparationRoadsReady)
+    LaunchedEffect(showWarmup, foreground, state.capture.active, state.capturedConfig, state.captureRevision,
+        state.busy, state.mapConsent, state.roadReport, state.certificateSetup, state.preparationError) {
+        if (showWarmup && state.loaded && foreground && !state.busy && !state.capture.active &&
+            state.capturedConfig && state.captureRevision == DiagnosticStore.CURRENT_CAPTURE_REVISION &&
+            !needsCertificateSetup(state.certificateSetup, state.capturedConfig, state.certificateTrusted, false) &&
+            !state.preparationRoadsReady && attemptedRoadScope != roadScopeKey && state.preparationError == null &&
+            automaticStep in setOf(PreparationStep.CHECK_ROADS, PreparationStep.MAP_CONSENT)) {
+            if (!BuildConfig.MAP_KEY_CONFIGURED) return@LaunchedEffect
+            if (!state.mapConsent) { showWarmup = false; showMapPrivacy = true }
+            else { attemptedRoadScope = roadScopeKey; onAcknowledgePreparation() }
+        }
+    }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
@@ -362,17 +387,15 @@ fun IbudaoaApp(
         WarmupDialog(
             state = state,
             onContinue = {
-                if (needsCertificateSetup(state.certificateSetup, state.capturedConfig, state.certificateTrusted, state.capture.active)) {
+                if (state.preparationRoadsReady && !state.busy && !state.capture.active &&
+                    state.capturedConfig && state.captureRevision == DiagnosticStore.CURRENT_CAPTURE_REVISION) {
+                    showWarmup = false
+                } else if (state.capturedConfig && !state.capture.active && !state.mapConsent &&
+                    !needsCertificateSetup(state.certificateSetup, state.capturedConfig, state.certificateTrusted, false)) {
+                    showWarmup = false; showMapPrivacy = true
+                } else {
+                    attemptedRoadScope = roadScopeKey
                     onAcknowledgePreparation()
-                } else when (PreparationStepResolver.next(state.capturedConfig, state.captureRevision,
-                    DiagnosticStore.CURRENT_CAPTURE_REVISION, state.capture.active, BuildConfig.MAP_KEY_CONFIGURED,
-                    state.mapConsent, state.roadReport?.phase, state.busy,
-                    state.roadReport?.reviewRevision ?: io.github.ibudaoa.roads.RoadBatchReport.CURRENT_REVIEW_REVISION)) {
-                    PreparationStep.WAIT -> Unit
-                    PreparationStep.EXPORT_RESULT -> onExport()
-                    PreparationStep.MAP_UNAVAILABLE -> onMessage("学校配置已保存。地图服务尚未配置，暂不能完成运行准备；无需重新采集。")
-                    PreparationStep.MAP_CONSENT -> { showWarmup = false; showMapPrivacy = true }
-                    else -> onAcknowledgePreparation()
                 }
             },
             onDismiss = { onCancelCapture(); showWarmup = false },
@@ -813,93 +836,45 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
     val setup = state.certificateSetup
     val certificateStep = needsCertificateSetup(setup, state.capturedConfig, state.certificateTrusted, state.capture.active)
     val capture = state.capture
-    val roads = state.roadReport
-    val needsRoadReview = roads != null && roads.reviewRevision != io.github.ibudaoa.roads.RoadBatchReport.CURRENT_REVIEW_REVISION
-    val needsCapture = state.capturedConfig && state.captureRevision != DiagnosticStore.CURRENT_CAPTURE_REVISION
-    val missing = state.config?.structure?.missingSections.orEmpty()
-    val current = when {
-        capture.phase == CapturePhase.LISTENING -> 2
-        capture.phase == CapturePhase.STARTING -> 1
-        state.capturedConfig && state.certificateTrusted ->
-            if (missing.isEmpty() && state.config?.stageVerification != StageVerification.UNKNOWN) 3 else 2
-        state.certificateTrusted -> 1
-        else -> 0
-    }
+    val roads = state.preparationRoadReport
+    val needsCapture = !state.capturedConfig || state.captureRevision != DiagnosticStore.CURRENT_CAPTURE_REVISION
+    val roadStep = !certificateStep && !capture.active && !needsCapture
+    val ready = roadStep && state.preparationRoadsReady && !state.busy
+    val failed = roadStep && !state.busy && (state.preparationError != null ||
+        roads?.phase in setOf(RoadBatchPhase.FAILED, RoadBatchPhase.INTERRUPTED, RoadBatchPhase.COMPLETE) && !ready)
+    val current = when { certificateStep -> 0; !roadStep -> 1; ready -> 3; else -> 2 }
     val heading = when {
         certificateStep -> when (setup) {
-            CertificateSetupPhase.CHECKING -> "正在检查证书"
-            CertificateSetupPhase.SAVING -> "正在准备证书"
-            CertificateSetupPhase.NOT_INSTALLED -> "尚未完成安装"
-            CertificateSetupPhase.CHECK_FAILED -> "暂时无法检查证书"
-            CertificateSetupPhase.SAVE_FAILED -> "证书未能保存"
-            CertificateSetupPhase.WAITING_INSTALL -> "安装连接证书"
-            else -> "首次连接准备"
+            CertificateSetupPhase.CHECK_FAILED -> "暂时无法检查证书，请重试。"
+            CertificateSetupPhase.SAVE_FAILED -> "证书未能保存，请重试。"
+            CertificateSetupPhase.SAVING -> "正在保存证书……"
+            else -> "正在检查证书……"
         }
-        !capture.active && needsRoadReview -> "更新道路检查"
-        !capture.active && roads?.phase == RoadBatchPhase.RUNNING -> "正在核对候选道路"
-        !capture.active && roads?.phase == RoadBatchPhase.COMPLETE -> "检查结果已就绪"
-        !capture.active && roads?.phase == RoadBatchPhase.FAILED -> "道路检查未完成"
-        !capture.active && roads?.phase == RoadBatchPhase.INTERRUPTED -> "道路检查已中断"
-        !capture.active && needsCapture -> "补齐学校配置"
-        capture.active -> if (capture.phase == CapturePhase.STARTING) "正在连接官方应用" else "同步学校配置"
-        capture.phase == CapturePhase.ERROR -> "连接尚未完成"
-        state.capturedConfig && state.config?.stageVerification == StageVerification.REQUIRED -> "当前核验要求暂不支持"
-        state.capturedConfig -> "学校配置已采集"
-        !state.certificateTrusted -> "准备本机连接证书"
-        else -> "连接官方账号"
-    }
-    val roadFailureNote = when (roads?.links?.lastOrNull()?.failure) {
-        io.github.ibudaoa.roads.RoadLinkFailure.AUTHORIZATION -> "道路服务授权未通过。"
-        io.github.ibudaoa.roads.RoadLinkFailure.QUOTA -> "道路服务额度或请求频率受限。"
-        io.github.ibudaoa.roads.RoadLinkFailure.NETWORK -> "道路服务网络连接未完成。"
-        else -> ""
-    }
-    val description = when {
-        certificateStep -> when (setup) {
-            CertificateSetupPhase.CHECKING -> "正在检查本机是否已安装连接证书。"
-            CertificateSetupPhase.SAVING -> "正在将公开证书保存到“下载”，无需选择保存位置。"
-            CertificateSetupPhase.CHECK_FAILED -> "暂时无法确认安装状态，请点击重试。不会因此重复安装证书。"
-            CertificateSetupPhase.SAVE_FAILED -> "无法将证书保存到“下载”，请检查可用存储空间后重试。"
-            else -> "首次连接需要安装本应用的 CA 证书，用于读取官方账号和学校配置，通常只需一次。"
-        }
-        !capture.active && needsRoadReview -> "检查器已更新。继续只重新核对道路，沿用已补齐的学校配置，不需要再次进入官方应用。不会自动启动运动。"
-        !capture.active && roads?.phase == RoadBatchPhase.RUNNING ->
-            "已核对 ${roads.links.size}/${roads.plannedLinks} 段。请保持应用前台；只查询官方候选间道路，不使用你的位置，也不创建运动。"
-        !capture.active && roads?.phase in setOf(RoadBatchPhase.COMPLETE, RoadBatchPhase.FAILED) ->
-            roadFailureNote + "已取得 ${roads?.links?.size}/${roads?.plannedLinks} 段检查结果。导出检查结果后交回核对，文件合并本次学校配置和道路摘要；道路接口成功不等于完整路线或运动有效。"
-        !capture.active && roads?.phase == RoadBatchPhase.INTERRUPTED ->
-            "已停止查询并保留完成摘要。保持应用前台后点击重试；不会自动恢复或启动运动。"
-        !capture.active && needsCapture ->
-            "旧导出未保留完整的星期和日期字段，需要补读一次。继续后进入官方校园跑准备页，不点击开始；采集成功返回这里，再继续核对道路。无需重新安装证书。"
-        capture.active || capture.phase == CapturePhase.ERROR -> capture.message
-        state.capturedConfig -> if (state.config?.stageVerification == StageVerification.UNKNOWN)
-            "已保存学校配置，阶段核验要求仍待核对；当前不会开始运动，无需为此重复采集。"
-            else if (state.config?.stageVerification == StageVerification.REQUIRED)
-                "学校配置明确要求人脸核验，当前版本尚不支持，暂不能开始运动。"
-            else if (state.config?.stageVerification == StageVerification.SKIPPED_EMPTY)
-                "本次人脸配置为空，按当前策略暂时跳过。继续检查地图与前台定位；日期和道路仍待核对，暂不开放运动。"
-            else if (missing.isEmpty()) "已保存脱敏配置。规则与真实地图仍需核对，当前不会开始运动。"
-            else "已保存收到的脱敏配置，仍有关键配置缺失。请导出诊断配置交回核对。"
-        !state.certificateTrusted -> "请先完成连接证书安装。"
-        else -> "请确认步道乐跑已登录。继续后允许临时 VPN，在官方应用进入校园跑准备页，不要点击开始运动；读到配置后返回这里。"
+        capture.phase == CapturePhase.ERROR && !roadStep -> capture.message
+        !BuildConfig.MAP_KEY_CONFIGURED && roadStep -> "地图服务尚未配置，暂时无法核对道路。"
+        !state.mapConsent && roadStep -> "请先同意地图服务隐私政策。"
+        failed -> state.preparationError ?: if (roads?.phase == RoadBatchPhase.INTERRUPTED) "道路核对已中断，请重试。" else "道路核对未完成，请重试。"
+        ready -> "道路核对完成"
+        else -> "核对道路中……"
     }
     val button = when {
-        setup == CertificateSetupPhase.CHECKING && certificateStep -> "正在检查…"
-        setup == CertificateSetupPhase.SAVING && certificateStep -> "正在保存…"
-        state.busy || capture.phase == CapturePhase.STARTING -> "正在准备…"
         certificateStep -> when (setup) {
             CertificateSetupPhase.CHECK_FAILED, CertificateSetupPhase.SAVE_FAILED -> "重试"
             CertificateSetupPhase.WAITING_INSTALL, CertificateSetupPhase.NOT_INSTALLED -> "已安装，继续"
+            CertificateSetupPhase.CHECKING, CertificateSetupPhase.SAVING -> "正在准备…"
             else -> "开始配置"
         }
+        roadStep && !state.mapConsent -> "同意并继续"
+        failed -> "重试"
+        roadStep -> "完成"
+        capture.phase == CapturePhase.STARTING -> "正在准备…"
         capture.phase == CapturePhase.LISTENING -> "返回官方应用"
-        !capture.active && needsRoadReview -> "继续核对道路"
-        !capture.active && roads?.phase in setOf(RoadBatchPhase.COMPLETE, RoadBatchPhase.FAILED) -> "导出检查结果"
-        !capture.active && roads?.phase == RoadBatchPhase.INTERRUPTED -> "重试检查"
-        state.capturedConfig -> "继续"
-        !state.certificateTrusted && !state.preparationAcknowledged -> "开始配置"
+        capture.phase == CapturePhase.ERROR -> "重试"
         else -> "继续"
     }
+    val enabled = !state.busy && capture.phase != CapturePhase.STARTING &&
+        setup !in setOf(CertificateSetupPhase.CHECKING, CertificateSetupPhase.SAVING) &&
+        (!roadStep || ready || failed || !state.mapConsent)
     val content: @Composable () -> Unit = {
         Surface(Modifier.padding(horizontal = 16.dp, vertical = 24.dp).widthIn(max = 560.dp)
             .fillMaxWidth().fillMaxHeight(0.78f), shape = RoundedCornerShape(28.dp),
@@ -914,7 +889,7 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
                     Text("跑前热身", Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
                         style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(10.dp))
-                    Text("已完成 $current / 4 项", Modifier.fillMaxWidth(),
+                    Text("已完成 $current / 3 项", Modifier.fillMaxWidth(),
                         textAlign = TextAlign.Center, style = MaterialTheme.typography.bodyLarge)
                     Spacer(Modifier.height(32.dp))
                     Stepper(current)
@@ -926,24 +901,15 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
                         Text("1.在手机设置里搜索并打开“安装证书”这个选项\n\n2.选择CA证书\n\n3.在Download文件夹里找到“$name”并安装",
                             style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                     } else if (!certificateStep && capture.phase != CapturePhase.ERROR &&
-                        (capture.active || (!state.capturedConfig && state.certificateTrusted))) {
+                        (capture.active || needsCapture)) {
                         Text("1.允许临时VPN\n\n2.在乐跑界面（就是那个大鸟的界面）停几秒\n\n3.回到本软件",
                             style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                     } else {
                         Text(heading, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.height(12.dp))
-                        Text(description, style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        if (!certificateStep) {
-                            Spacer(Modifier.height(12.dp))
-                            Text("临时连接仅用于读取官方应用的学校配置，两分钟内自动结束。采集期间其他官方功能可能暂不可用。运动仅支持前台亮屏，不做小窗。",
-                                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
                     }
                 }
                 Spacer(Modifier.height(20.dp))
-                Button(onClick = onContinue, enabled = !state.busy && capture.phase != CapturePhase.STARTING &&
-                    setup !in setOf(CertificateSetupPhase.CHECKING, CertificateSetupPhase.SAVING),
+                Button(onClick = onContinue, enabled = enabled,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp), shape = RoundedCornerShape(28.dp)) {
                     Text(button, style = MaterialTheme.typography.titleLarge)
                 }
@@ -963,12 +929,12 @@ private fun formatPace(seconds: Int): String = String.format(Locale.ROOT, "%d′
 
 @Composable
 private fun Stepper(current: Int) {
-    val labels = listOf("授权准备", "连接账号", "同步学校", "运行准备")
+    val labels = listOf("授权准备", "连接账号", "运行准备")
     val colors = MaterialTheme.colorScheme
     Box(Modifier.fillMaxWidth()) {
         Canvas(Modifier.fillMaxWidth().height(36.dp)) {
-            val unit = size.width / 4
-            repeat(3) { index ->
+            val unit = size.width / labels.size
+            repeat(labels.size - 1) { index ->
                 drawLine(if (index < current) colors.primary else colors.outlineVariant,
                     Offset(unit * (index + 0.5f), size.height / 2),
                     Offset(unit * (index + 1.5f), size.height / 2), strokeWidth = 2.dp.toPx())

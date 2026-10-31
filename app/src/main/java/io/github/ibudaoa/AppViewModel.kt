@@ -75,6 +75,7 @@ data class AppState(
     val connectionEpoch: Long = 0,
     val captureRevision: Int = 0,
     val capturedAtEpochSecond: Long = 0,
+    val preparationError: String? = null,
     val roadReport: RoadBatchReport? = null,
     val roadEvidence: RoadEvidenceSnapshot? = null,
     val roadGraph: ObservedRoadGraph? = null,
@@ -99,6 +100,15 @@ data class AppState(
     val executionRequirements:RunRuntimeRequirements?=null,
     val updateCheck:io.github.ibudaoa.updates.UpdateSummary=io.github.ibudaoa.updates.UpdateSummary(),
 )
+
+internal val AppState.preparationRoadReport: RoadBatchReport?
+    get() = roadReport?.takeIf { report ->
+        runCatching { RoadBatchPlan.create(config ?: return null, connectionEpoch).scope == report.scope }.getOrDefault(false)
+    }
+
+internal val AppState.preparationRoadsReady: Boolean
+    get() = capturedConfig && captureRevision == DiagnosticStore.CURRENT_CAPTURE_REVISION &&
+        io.github.ibudaoa.domain.PreparationRoads.ready(config, connectionEpoch, roadReport, roadEvidence)
 
 private data class RoadComputation(val base: ObservedRoadGraph?, val graph: ObservedRoadGraph?,
     val route: RoutePlanResult?, val plan: RoadGapPlan?)
@@ -803,8 +813,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             requestCapture(requestedCapturePurpose)
             return
         }
+        if (snapshot.preparationRoadsReady) return
         if (!snapshot.manualGaps?.indices.isNullOrEmpty() || !snapshot.reviewedDirections?.reversible.isNullOrEmpty())
-            return showMessage("已保存手动道路确认，暂不能重新核对道路。")
+            return mutableState.update { it.copy(preparationError = "当前道路含手动确认，无法自动重新核对。") }
         if (!snapshot.capturedConfig || snapshot.captureRevision != DiagnosticStore.CURRENT_CAPTURE_REVISION) {
             continueCapture()
             return
@@ -812,8 +823,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val config = snapshot.config ?: return
         if (!snapshot.mapConsent || !BuildConfig.MAP_KEY_CONFIGURED || snapshot.capture.active) return
         val plan = runCatching { RoadBatchPlan.create(config, snapshot.connectionEpoch) }.getOrNull()
-            ?: return showMessage("候选道路检查暂不支持当前配置，请导出诊断配置。")
-        mutableState.update { it.copy(busy = true,
+            ?: return mutableState.update { it.copy(preparationError = "当前学校配置暂时无法核对道路，请重试。") }
+        CaptureVpnService.stopOwned(getApplication())
+        mutableState.update { it.copy(busy = true, preparationError = null,
             roadReport = RoadBatchReport(plan.scope, RoadBatchPhase.RUNNING, plan.candidateCount, plan.requests.size),
             roadEvidence = null, roadGraph = null, routeResult = null) }
         roadJob = viewModelScope.launch {
@@ -867,15 +879,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         roadReport = current.roadReport.copy(phase = RoadBatchPhase.FAILED)) else current
                 }
             } finally {
-                val report = state.value.roadReport?.takeIf { it.scope == plan.scope }
+                var report = state.value.roadReport?.takeIf { it.scope == plan.scope }
                 val evidence = state.value.roadEvidence?.takeIf { it.scope == plan.scope }
+                if (report?.phase == RoadBatchPhase.COMPLETE &&
+                    !io.github.ibudaoa.domain.PreparationRoads.ready(config, snapshot.connectionEpoch, report, evidence)) {
+                    report = report?.copy(phase = RoadBatchPhase.FAILED)
+                    mutableState.update { it.copy(roadReport = report) }
+                }
+                val finalReport = report
                 withContext(NonCancellable) {
-                    if (report != null) runCatching { store.saveRoadCheck(report, evidence) }.onFailure {
+                    if (finalReport != null) runCatching { store.saveRoadCheck(finalReport, evidence) }.onFailure {
+                        val failedReport = finalReport.copy(phase = RoadBatchPhase.FAILED)
+                        mutableState.update { it.copy(roadReport = failedReport, preparationError = "道路资料未能保存，请重试。") }
                         // Keep the safe summary if private geometry is too large or invalid.
                         mutableState.update { current ->
                             if (current.roadEvidence?.scope == plan.scope) current.copy(roadEvidence = null, roadGraph = null, routeResult = null) else current
                         }
-                        runCatching { store.saveRoadReport(report) }.onFailure {
+                        runCatching { store.saveRoadReport(failedReport) }.onFailure {
                             showMessage("道路检查结果未能保存；请确认当前配置未变更。")
                         }
                     }
