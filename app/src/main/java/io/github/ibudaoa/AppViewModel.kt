@@ -103,7 +103,7 @@ data class AppState(
 private data class RoadComputation(val base: ObservedRoadGraph?, val graph: ObservedRoadGraph?,
     val route: RoutePlanResult?, val plan: RoadGapPlan?)
 
-enum class CaptureAction { OPEN_SECURITY_SETTINGS, REQUEST_VPN, OPEN_OFFICIAL, STOP_CAPTURE }
+enum class CaptureAction { REQUEST_VPN, OPEN_OFFICIAL, STOP_CAPTURE }
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val store = DiagnosticStore(application)
@@ -787,7 +787,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (!certificateGate.accepts(setupGeneration) || !captureFlowActive) return@operation
                 mutableState.update { it.copy(certificateFileName = file.fileName, certificateSetup = CertificateSetupPhase.WAITING_INSTALL) }
-                if (certificateGate.waiting(setupGeneration)) sendCaptureAction(CaptureAction.OPEN_SECURITY_SETTINGS)
+                certificateGate.waiting(setupGeneration)
             }
         }
     }
@@ -987,10 +987,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun certificateSettingsUnavailable() {
-        if (captureFlowActive) mutableState.update { it.copy(certificateSetup = CertificateSetupPhase.SETTINGS_UNAVAILABLE) }
-    }
-
     fun refreshCertificateStatus() {
         if (state.value.busy || certificateCheckJob?.isActive == true) return
         val generation = certificateGate.current()
@@ -1011,7 +1007,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             if (generation != certificateGate.current()) return@launch
             val phase = when {
                 trusted -> CertificateSetupPhase.INSTALLED
-                previousPhase == CertificateSetupPhase.SETTINGS_UNAVAILABLE -> previousPhase
                 file != null && certificateGate.accepts(generation) -> CertificateSetupPhase.NOT_INSTALLED
                 file != null -> CertificateSetupPhase.WAITING_INSTALL
                 else -> CertificateSetupPhase.IDLE

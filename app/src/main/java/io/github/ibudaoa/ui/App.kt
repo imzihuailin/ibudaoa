@@ -810,7 +810,6 @@ private fun ToolCard(title: String, subtitle: String, icon: ImageVector, trailin
 
 @Composable
 internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: () -> Unit) {
-    var showCertificateHelp by rememberSaveable { mutableStateOf(false) }
     val setup = state.certificateSetup
     val certificateStep = needsCertificateSetup(setup, state.capturedConfig, state.certificateTrusted, state.capture.active)
     val capture = state.capture
@@ -833,7 +832,6 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
             CertificateSetupPhase.NOT_INSTALLED -> "尚未完成安装"
             CertificateSetupPhase.CHECK_FAILED -> "暂时无法检查证书"
             CertificateSetupPhase.SAVE_FAILED -> "证书未能保存"
-            CertificateSetupPhase.SETTINGS_UNAVAILABLE -> "请打开系统设置安装"
             CertificateSetupPhase.WAITING_INSTALL -> "安装连接证书"
             else -> "首次连接准备"
         }
@@ -862,7 +860,6 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
             CertificateSetupPhase.SAVING -> "正在将公开证书保存到“下载”，无需选择保存位置。"
             CertificateSetupPhase.CHECK_FAILED -> "暂时无法确认安装状态，请点击重试。不会因此重复安装证书。"
             CertificateSetupPhase.SAVE_FAILED -> "无法将证书保存到“下载”，请检查可用存储空间后重试。"
-            CertificateSetupPhase.SETTINGS_UNAVAILABLE -> "无法自动打开设置。请手动进入系统设置，找到“安装证书”或“CA 证书”。"
             else -> "首次连接需要安装本应用的 CA 证书，用于读取官方账号和学校配置，通常只需一次。"
         }
         !capture.active && needsRoadReview -> "检查器已更新。继续只重新核对道路，沿用已补齐的学校配置，不需要再次进入官方应用。不会自动启动运动。"
@@ -892,8 +889,7 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
         state.busy || capture.phase == CapturePhase.STARTING -> "正在准备…"
         certificateStep -> when (setup) {
             CertificateSetupPhase.CHECK_FAILED, CertificateSetupPhase.SAVE_FAILED -> "重试"
-            CertificateSetupPhase.SETTINGS_UNAVAILABLE -> "重新打开设置"
-            CertificateSetupPhase.WAITING_INSTALL, CertificateSetupPhase.NOT_INSTALLED -> "继续安装"
+            CertificateSetupPhase.WAITING_INSTALL, CertificateSetupPhase.NOT_INSTALLED -> "已安装，继续"
             else -> "开始配置"
         }
         capture.phase == CapturePhase.LISTENING -> "返回官方应用"
@@ -925,26 +921,21 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
                     Spacer(Modifier.height(28.dp))
                     HorizontalDivider()
                     Spacer(Modifier.height(28.dp))
-                    Text(heading, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(12.dp))
-                    Text(description, style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(Modifier.height(12.dp))
-                    if (certificateStep) {
-                        state.certificateFileName?.takeIf { setup in setOf(CertificateSetupPhase.WAITING_INSTALL, CertificateSetupPhase.NOT_INSTALLED, CertificateSetupPhase.SETTINGS_UNAVAILABLE) }?.let { name ->
-                            Text("已保存到：下载 / $name", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                            Spacer(Modifier.height(8.dp))
-                            Text("在系统中选择安装 CA 证书，再从“下载”选中此文件并确认。安装后返回，会自动检查并继续。",
-                                style = MaterialTheme.typography.bodyMedium)
+                    if (certificateStep && setup in setOf(CertificateSetupPhase.IDLE, CertificateSetupPhase.WAITING_INSTALL, CertificateSetupPhase.NOT_INSTALLED)) {
+                        val name = state.certificateFileName ?: "ibudaoa-连接证书.cer.crt"
+                        Text("1.在手机设置里搜索并打开“安装证书”这个选项\n\n2.选择CA证书\n\n3.在Download文件夹里找到“$name”并安装",
+                            style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    } else {
+                        Text(heading, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(12.dp))
+                        Text(description, style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (!certificateStep) {
+                            Spacer(Modifier.height(12.dp))
+                            Text("临时连接仅用于读取官方应用的学校配置，两分钟内自动结束。采集期间其他官方功能可能暂不可用。运动仅支持前台亮屏，不做小窗。",
+                                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        TextButton(onClick = { showCertificateHelp = !showCertificateHelp }) {
-                            Text(if (showCertificateHelp) "收起说明" else "安装步骤与证书用途")
-                        }
-                        if (showCertificateHelp) Text(
-                            "在系统设置中找到“安装证书”或“CA 证书”，选择“下载”中的上述文件。系统可能要求锁屏验证，请阅读系统用途提示后确认。\n\n这是本机生成的连接证书，私钥只留在本机。临时 VPN 用于读取官方账号和学校配置，最多两分钟，不会启动运动。",
-                            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    } else Text("临时连接仅用于读取官方应用的学校配置，两分钟内自动结束。采集期间其他官方功能可能暂不可用。运动仅支持前台亮屏，不做小窗。",
-                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
                 Spacer(Modifier.height(20.dp))
                 Button(onClick = onContinue, enabled = !state.busy && capture.phase != CapturePhase.STARTING &&

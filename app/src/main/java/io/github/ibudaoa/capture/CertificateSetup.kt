@@ -3,7 +3,7 @@ package io.github.ibudaoa.capture
 import java.security.MessageDigest
 
 /** Public UI state only; no credential, private key, or private URI. */
-enum class CertificateSetupPhase { IDLE, CHECKING, SAVING, WAITING_INSTALL, NOT_INSTALLED, INSTALLED, CHECK_FAILED, SAVE_FAILED, SETTINGS_UNAVAILABLE }
+enum class CertificateSetupPhase { IDLE, CHECKING, SAVING, WAITING_INSTALL, NOT_INSTALLED, INSTALLED, CHECK_FAILED, SAVE_FAILED }
 
 internal fun needsCertificateSetup(phase: CertificateSetupPhase, captured: Boolean, trusted: Boolean, capturing: Boolean): Boolean =
     !capturing && (phase !in setOf(CertificateSetupPhase.IDLE, CertificateSetupPhase.INSTALLED) || (!captured && !trusted))
@@ -24,7 +24,7 @@ internal class CertificateDownloadRepository(private val storage: CertificateDow
         require(bytes.size in 1..65_536)
         val fingerprint = fingerprint(bytes)
         val previous = storage.reference()
-        return previous?.takeIf { it.fingerprint == fingerprint && storage.read(it.uri)?.contentEquals(bytes) == true }
+        return previous?.takeIf { it.fileName.endsWith(".crt") && it.fingerprint == fingerprint && storage.read(it.uri)?.contentEquals(bytes) == true }
     }
 
     private fun fingerprint(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it.toInt() and 255) }

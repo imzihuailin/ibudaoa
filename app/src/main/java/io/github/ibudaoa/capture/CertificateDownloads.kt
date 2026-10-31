@@ -86,5 +86,5 @@ internal class CertificateDownloads(context: Context) : CertificateDownloadStora
         }
     }
 
-    companion object { const val FILE_NAME = "ibudaoa-连接证书.cer" }
+    companion object { const val FILE_NAME = "ibudaoa-连接证书.cer.crt" }
 }

@@ -3,7 +3,6 @@ package io.github.ibudaoa
 import android.os.Bundle
 import android.content.Intent
 import android.net.VpnService
-import android.provider.Settings
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -48,9 +47,6 @@ class MainActivity : ComponentActivity() {
                 model.captureActions.collect { action ->
                     if (action != CaptureAction.STOP_CAPTURE && !model.captureRequested) return@collect
                     when (action) {
-                        CaptureAction.OPEN_SECURITY_SETTINGS -> runCatching {
-                            startActivity(Intent(Settings.ACTION_SECURITY_SETTINGS))
-                        }.onFailure { model.certificateSettingsUnavailable() }
                         CaptureAction.REQUEST_VPN -> requestVpn()
                         CaptureAction.OPEN_OFFICIAL -> openOfficial()
                         CaptureAction.STOP_CAPTURE -> CaptureVpnService.stopOwned(this@MainActivity)

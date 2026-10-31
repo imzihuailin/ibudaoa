@@ -17,7 +17,7 @@ class CertificateSetupTest {
             if (failPublish) error("Fake disk failure")
             val uri = "file-$writes"
             files[uri] = bytes.clone()
-            return CertificateDownload(uri, fingerprint, "certificate-$writes.cer")
+            return CertificateDownload(uri, fingerprint, "certificate-$writes.cer.crt")
         }
         override fun remember(file: CertificateDownload) { if (failRemember) error("Fake metadata failure"); ref = file }
         override fun remove(uri: String) { files.remove(uri) }
@@ -30,7 +30,7 @@ class CertificateSetupTest {
         assertEquals(first, restored.existing(byteArrayOf(1, 2, 3)))
         assertEquals(first, restored.ensure(byteArrayOf(1, 2, 3)))
         assertEquals(1, store.writes)
-        assertEquals("certificate-1.cer", first.fileName)
+        assertEquals("certificate-1.cer.crt", first.fileName)
     }
 
     @Test fun `missing file is recreated and actual filename returned`() {
@@ -39,7 +39,18 @@ class CertificateSetupTest {
         assertNull(repo.existing(byteArrayOf(1)))
         val replacement = repo.ensure(byteArrayOf(1))
         assertNotEquals(old.uri, replacement.uri)
-        assertEquals("certificate-2.cer", replacement.fileName)
+        assertEquals("certificate-2.cer.crt", replacement.fileName)
+    }
+
+    @Test fun `legacy filename is replaced without deleting old download`() {
+        val store = Downloads(); val repo = CertificateDownloadRepository(store)
+        val old = repo.ensure(byteArrayOf(1))
+        store.ref = old.copy(fileName = "ibudaoa-连接证书.cer")
+        assertNull(repo.existing(byteArrayOf(1)))
+        val replacement = repo.ensure(byteArrayOf(1))
+        assertNotEquals(old.uri, replacement.uri)
+        assertTrue(store.files.containsKey(old.uri))
+        assertEquals(replacement, repo.ensure(byteArrayOf(1)))
     }
 
     @Test fun `modified contents or changed root cannot reuse stale file`() {
