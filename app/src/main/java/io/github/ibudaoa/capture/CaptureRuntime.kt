@@ -7,7 +7,7 @@ import kotlinx.coroutines.flow.update
 
 enum class CapturePurpose { CONFIG, ACCOUNT_READ_CHECK, ACCOUNT_SESSION }
 
-enum class CapturePhase { IDLE, STARTING, LISTENING, CAPTURED, CANCELLED, ERROR }
+enum class CapturePhase { IDLE, STARTING, LISTENING, FINALIZING, CAPTURED, CANCELLED, ERROR }
 
 enum class CaptureProblem(val userMessage: String) {
     NONE(""),
@@ -20,6 +20,7 @@ enum class CaptureProblem(val userMessage: String) {
     ACCOUNT_CHANGED("官方账号会话已失效或发生变化，请在官方应用确认登录状态后再连接。"),
     CERTIFICATE("尚未确认 CA 证书安装，请返回完成授权准备。"),
     VPN("临时连接未建立，请检查官方应用、证书和 VPN 授权。"),
+    INCOMPLETE("尚未读全连接资料，请返回乐跑确认已登录后重试。"),
     TIMEOUT("采集已超时并关闭连接。请确认官方应用已登录后重试。"),
     STORAGE("配置未能保存，原有数据已保留；若配置发生变化，请先处理已确认的道路。"),
     REVOKED("VPN 授权已撤销，采集已停止。"),
@@ -39,7 +40,7 @@ data class CaptureState(
     val blockedKinds: Set<BlockedRequestKind> = emptySet(),
     val profile: AccountProfilePreview? = null,
 ) {
-    val active: Boolean get() = phase == CapturePhase.STARTING || phase == CapturePhase.LISTENING
+    val active: Boolean get() = phase == CapturePhase.STARTING || phase == CapturePhase.LISTENING || phase == CapturePhase.FINALIZING
 }
 
 /** Process-local, sanitized state only. Generation fences late callbacks after cancellation. */

@@ -172,7 +172,7 @@ fun IbudaoaApp(
         state.preparationRoadsReady)
     LaunchedEffect(showWarmup, foreground, state.capture.active, state.capturedConfig, state.captureRevision,
         state.busy, state.mapConsent, state.roadReport, state.certificateSetup, state.preparationError) {
-        if (showWarmup && state.loaded && foreground && !state.busy && !state.capture.active &&
+        if (showWarmup && state.loaded && foreground && !state.busy && !state.capture.active && state.capture.phase != CapturePhase.ERROR &&
             state.capturedConfig && state.captureRevision == DiagnosticStore.CURRENT_CAPTURE_REVISION &&
             !needsCertificateSetup(state.certificateSetup, state.capturedConfig, state.certificateTrusted, false) &&
             !state.preparationRoadsReady && attemptedRoadScope != roadScopeKey && state.preparationError == null &&
@@ -387,7 +387,7 @@ fun IbudaoaApp(
         WarmupDialog(
             state = state,
             onContinue = {
-                if (state.preparationRoadsReady && !state.busy && !state.capture.active &&
+                if (state.preparationRoadsReady && !state.busy && !state.capture.active && state.capture.phase != CapturePhase.ERROR &&
                     state.capturedConfig && state.captureRevision == DiagnosticStore.CURRENT_CAPTURE_REVISION) {
                     showWarmup = false
                 } else if (state.capturedConfig && !state.capture.active && !state.mapConsent &&
@@ -838,7 +838,7 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
     val capture = state.capture
     val roads = state.preparationRoadReport
     val needsCapture = !state.capturedConfig || state.captureRevision != DiagnosticStore.CURRENT_CAPTURE_REVISION
-    val roadStep = !certificateStep && !capture.active && !needsCapture
+    val roadStep = !certificateStep && !capture.active && !needsCapture && capture.phase != CapturePhase.ERROR
     val ready = roadStep && state.preparationRoadsReady && !state.busy
     val failed = roadStep && !state.busy && (state.preparationError != null ||
         roads?.phase in setOf(RoadBatchPhase.FAILED, RoadBatchPhase.INTERRUPTED, RoadBatchPhase.COMPLETE) && !ready)
@@ -850,6 +850,7 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
             CertificateSetupPhase.SAVING -> "正在保存证书……"
             else -> "正在检查证书……"
         }
+        capture.phase == CapturePhase.FINALIZING -> capture.message
         capture.phase == CapturePhase.ERROR && !roadStep -> capture.message
         !BuildConfig.MAP_KEY_CONFIGURED && roadStep -> "地图服务尚未配置，暂时无法核对道路。"
         !state.mapConsent && roadStep -> "请先同意地图服务隐私政策。"
@@ -867,12 +868,13 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
         roadStep && !state.mapConsent -> "同意并继续"
         failed -> "重试"
         roadStep -> "完成"
+        capture.phase == CapturePhase.FINALIZING -> "正在保存…"
         capture.phase == CapturePhase.STARTING -> "正在准备…"
         capture.phase == CapturePhase.LISTENING -> "返回官方应用"
         capture.phase == CapturePhase.ERROR -> "重试"
         else -> "继续"
     }
-    val enabled = !state.busy && capture.phase != CapturePhase.STARTING &&
+    val enabled = !state.busy && capture.phase !in setOf(CapturePhase.STARTING, CapturePhase.FINALIZING) &&
         setup !in setOf(CertificateSetupPhase.CHECKING, CertificateSetupPhase.SAVING) &&
         (!roadStep || ready || failed || !state.mapConsent)
     val content: @Composable () -> Unit = {
@@ -901,11 +903,24 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
                         Text("1.在手机设置里搜索并打开“安装证书”这个选项\n\n2.选择CA证书\n\n3.在Download文件夹里找到“$name”并安装",
                             style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                     } else if (!certificateStep && capture.phase != CapturePhase.ERROR &&
-                        (capture.active || needsCapture)) {
-                        Text("1.允许临时VPN\n\n2.在乐跑界面（就是那个大鸟的界面）停几秒\n\n3.回到本软件",
+                        (capture.active || needsCapture) && capture.phase != CapturePhase.FINALIZING) {
+                        Text("1.允许临时VPN\n\n2.在乐跑界面（就是那个大鸟的界面）停几秒\n\n3.等待自动跳转回来",
                             style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                     } else {
                         Text(heading, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        if (roadStep) {
+                            Spacer(Modifier.height(16.dp))
+                            val total = roads?.plannedLinks ?: 0
+                            if (ready || total > 0) {
+                                val progress = if (ready) 1f else
+                                    (roads!!.links.size.toFloat() / total).coerceIn(0f, 1f)
+                                LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                            } else if (failed) {
+                                LinearProgressIndicator(progress = { 0f }, modifier = Modifier.fillMaxWidth())
+                            } else {
+                                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                            }
+                        }
                     }
                 }
                 Spacer(Modifier.height(20.dp))

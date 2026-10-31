@@ -55,6 +55,8 @@ internal class ForegroundAccountSession(private val clock:()->Long={System.nanoT
     private val mutable=MutableStateFlow(AccountSessionSnapshot())
     val state=mutable.asStateFlow()
     private var generation=0L
+    private val cancelledCapture = java.util.concurrent.atomic.AtomicLong(0L)
+    fun invalidateCapture(ticket: Long) { cancelledCapture.accumulateAndGet(ticket, ::maxOf) }
     private var material:ByteArray?=null
     private var pending:ByteArray?=null
     private var returnDeadline=0L
@@ -155,13 +157,13 @@ internal class ForegroundAccountSession(private val clock:()->Long={System.nanoT
         return generation
     }
     @Synchronized fun accept(ticket:Long,request:LocalRequest):Boolean {
-        if(ticket!=generation || mutable.value.phase!=AccountSessionPhase.CONNECTING || clock()>=returnDeadline) return false
+        if(ticket!=generation || ticket<=cancelledCapture.get() || mutable.value.phase!=AccountSessionPhase.CONNECTING || clock()>=returnDeadline) return false
         pending?.fill(0)
         pending=AccountReadProbe.projectForStorage(request)
         return true
     }
     @Synchronized fun acquisition(ticket:Long,result:AccountReadResult) {
-        if(ticket!=generation) return
+        if(ticket!=generation || ticket<=cancelledCapture.get()) return
         if(!result.readAccepted || pending==null) { failCapture(result);return }
         try {
             material?.let { old -> val inherited=AccountProtocol.inherit(old,pending!!);pending!!.fill(0);pending=inherited }
@@ -181,7 +183,7 @@ internal class ForegroundAccountSession(private val clock:()->Long={System.nanoT
         }
     }
     @Synchronized fun offerProtocol(ticket:Long,context:ByteArray) {
-        if(ticket!=generation) return
+        if(ticket!=generation || ticket<=cancelledCapture.get()) return
         val current=material
         if(current!=null) {
             val merged=runCatching { AccountProtocol.merge(current,context) }.getOrNull()
@@ -200,6 +202,36 @@ internal class ForegroundAccountSession(private val clock:()->Long={System.nanoT
         mutable.value=mutable.value.copy(phase=if(material!=null)AccountSessionPhase.RESTORED else AccountSessionPhase.FAILED,
             end=end,acquisition=result)
     }
+    @Synchronized fun captureReady(ticket: Long): Boolean = ticket == generation && ticket > cancelledCapture.get() && clock() < returnDeadline &&
+        mutable.value.acquisition?.readAccepted == true && mutable.value.credentialsPersisted &&
+        mutable.value.protocolReady && material != null
+
+    @Synchronized fun captureSchoolMatches(ticket: Long, config: DiagnosticConfig): Boolean {
+        if (!captureReady(ticket)) return false
+        val school = runCatching { Json.parseToJsonElement(material!!.toString(Charsets.UTF_8)).jsonObject
+            .getValue("parameters").jsonObject["school_id"]?.jsonPrimitive?.content }.getOrNull()
+        return school != null && config.config["school_id"]?.jsonPrimitive?.content == school
+    }
+
+    @Synchronized fun captureContextMatches(ticket: Long, context: ByteArray): Boolean {
+        if (!captureReady(ticket)) return false
+        val merged = runCatching { AccountProtocol.merge(material!!,context) }.getOrNull() ?: return false
+        merged.fill(0)
+        return true
+    }
+
+    /** Restricted to this explicit temporary acquisition, not a general background account read. */
+    fun readCaptureSchool(ticket: Long, transport: AccountReadConnection, now: Long, nonce: Int): DiagnosticConfig? {
+        val working = synchronized(this) { if (!captureReady(ticket)) null else material!!.clone() }
+            ?: return null.also { transport.close() }
+        try {
+            val request = AccountProtocol.request(working, ReadOnlyPolicy.BEFORE_RUN, now, nonce)
+            val response = try { transport.send(request) } finally { request.body.fill(0) }
+            val config = try { BeforeRunDecoder.decode(response) } finally { response.fill(0) }
+            return config.takeIf { captureSchoolMatches(ticket, it) }
+        } finally { working.fill(0); transport.close() }
+    }
+
     @Synchronized fun captureEnded(ticket:Long) {
         if(ticket!=generation) return
         wipeCandidates()

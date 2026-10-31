@@ -309,4 +309,36 @@ class AccountMaintenanceTest {
         assertNull(s.verifiedSchool(1793000101));assertFalse(s.isCurrent(old,1793000101))
     }
 
+    @Test fun `temporary captured account binds school only after encrypted material is saved`() {
+        val store=MaintenanceFixture.Store(); val session=f.session(store);val ticket=session.begin()
+        val request=AccountReadProbe.restoreFromStorage(f.material())
+        assertFalse(session.captureReady(ticket))
+        assertTrue(session.accept(ticket,request));request.body.fill(0)
+        session.acquisition(ticket,AccountReadResult(AccountReadOutcome.READ_ACCEPTED_UNBOUND,1,true))
+        assertTrue(session.captureReady(ticket))
+        assertTrue(session.captureSchoolMatches(ticket,DiagnosticCodec.decode(f.config)))
+        assertFalse(session.captureSchoolMatches(ticket,DiagnosticCodec.decode(f.config.replace("\"school_id\":1","\"school_id\":2"))))
+        val context=AccountProtocol.capture(AccountProtocol.request(f.material(),ReadOnlyPolicy.BEFORE_RUN,1793000100,654321),f.fresh().toByteArray())
+        assertTrue(session.captureContextMatches(ticket,context))
+        session.invalidateCapture(ticket)
+        assertFalse(session.captureReady(ticket));assertFalse(session.captureContextMatches(ticket,context))
+        context.fill(0)
+    }
+    @Test fun `cancelled acquisition cannot replace persisted login with late profile response`() {
+        val store=MaintenanceFixture.Store();val session=f.session(store);val before=store.bytes!!.clone()
+        val ticket=session.begin();session.invalidateCapture(ticket)
+        val request=AccountReadProbe.restoreFromStorage(f.material())
+        assertFalse(session.accept(ticket,request));request.body.fill(0)
+        session.acquisition(ticket,AccountReadResult(AccountReadOutcome.READ_ACCEPTED_UNBOUND,1,true))
+        assertArrayEquals(before,store.bytes)
+    }
+    @Test fun `acquisition school read is exact endpoint and late invalidation fences result`() {
+        val store=MaintenanceFixture.Store();val session=f.session(store);val ticket=session.begin()
+        val request=AccountReadProbe.restoreFromStorage(f.material());session.accept(ticket,request);request.body.fill(0)
+        session.acquisition(ticket,AccountReadResult(AccountReadOutcome.READ_ACCEPTED_UNBOUND,1,true))
+        val transport=MaintenanceFixture.Connection { assertEquals(ReadOnlyPolicy.BEFORE_RUN,it.target);session.invalidateCapture(ticket);f.fresh() }
+        assertNull(session.readCaptureSchool(ticket,transport,1793000100,654321))
+        assertEquals(1,transport.paths.size)
+    }
+
 }

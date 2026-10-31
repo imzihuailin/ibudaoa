@@ -132,6 +132,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var certificateCheckJob: Job? = null
     private var requestedOpenGeneration = 0L
     private var requestedStopGeneration = 0L
+    private var completedCaptureReturnGeneration = 0L
     private var captureFlowActive = CaptureRuntime.state.value.active
     private var accountForeground=false
     private var accountResumeJob:Job?=null
@@ -145,7 +146,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var runGrant:VerifiedSchoolConfig?=null
     private var preparedRunningPlan:RunningPlan?=null
     val captureRequested: Boolean get() = captureFlowActive
-    var requestedCapturePurpose: CapturePurpose = CapturePurpose.CONFIG
+    var requestedCapturePurpose: CapturePurpose = CapturePurpose.ACCOUNT_SESSION
         private set
 
     fun setDiagnosticMode(enabled: Boolean) {
@@ -268,7 +269,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     requestedStopGeneration != capture.generation) {
                     requestedStopGeneration = capture.generation
                     sendCaptureAction(CaptureAction.STOP_CAPTURE)
-                    if(capture.purpose==CapturePurpose.ACCOUNT_SESSION) resumeAccount()
+                    if(capture.purpose==CapturePurpose.ACCOUNT_SESSION && accountForeground) resumeAccount()
                 }
             }
         }
@@ -749,7 +750,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun resumeAccount() {
         if(!accountForeground || accountResumeJob?.isActive==true) return
         accountResumeJob=viewModelScope.launch {
-            withContext(Dispatchers.IO) { AccountSessionRuntime.initialize(getApplication()) }
+            withContext(Dispatchers.IO) {
+                AccountSessionRuntime.initialize(getApplication())
+                if (accountForeground) AccountSessionRuntime.session.onForeground()
+            }
+            val completedCapture = state.value.capture
+            if (completedCapture.phase == CapturePhase.CAPTURED && completedCapture.purpose == CapturePurpose.ACCOUNT_SESSION &&
+                completedCapture.generation != completedCaptureReturnGeneration &&
+                AccountSessionRuntime.session.state.value.acquisition?.readAccepted == true) {
+                completedCaptureReturnGeneration = completedCapture.generation
+                captureFlowActive = false
+                return@launch // This acquisition just verified and saved the same login and school.
+            }
             var remaining=100
             while(accountForeground && state.value.busy && remaining-->0) delay(50)
             // An explicit connection can be awaiting system VPN consent before the service
@@ -762,7 +774,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun continueCapture() {
         if(automaticTaskOpen())return showMessage("请先核对当前自动任务，原配置会保留。")
-        requestCapture(CapturePurpose.CONFIG)
+        requestCapture(CapturePurpose.ACCOUNT_SESSION)
     }
 
     private fun requestCapture(purpose: CapturePurpose) {
@@ -776,7 +788,35 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 if (state.value.capture.phase == CapturePhase.LISTENING) sendCaptureAction(CaptureAction.OPEN_OFFICIAL)
                 return@operation
             }
-            if (purpose==CapturePurpose.CONFIG) store.acknowledgePreparation()
+            if (purpose!=CapturePurpose.ACCOUNT_READ_CHECK) store.acknowledgePreparation()
+            // A confirmed retained session can fill school data without reopening a VPN.
+            if (purpose == CapturePurpose.ACCOUNT_SESSION && accountForeground) {
+                val restored = withContext(Dispatchers.IO) {
+                    AccountSessionRuntime.initialize(getApplication())
+                    val session = AccountSessionRuntime.session
+                    if (accountForeground && certificateGate.accepts(setupGeneration)) session.onForeground()
+                    val account = session.state.value
+                    if (account.available && account.protocolReady) {
+                        session.read(AccountReadTransport(maintenance=true), Instant.now().epochSecond,
+                            100_000+java.security.SecureRandom().nextInt(900_000),state.value.config)
+                        session.verifiedSchool(Instant.now().epochSecond)
+                    } else null
+                }
+                if (!certificateGate.accepts(setupGeneration) || !captureFlowActive || !accountForeground) return@operation
+                if (restored != null) {
+                    withContext(Dispatchers.IO) { store.save(restored.config,captured=true) }
+                    if (!certificateGate.accepts(setupGeneration) || !captureFlowActive) return@operation
+                    captureFlowActive=false
+                    certificateGate.cancel()
+                    val reusedGeneration = CaptureRuntime.begin(purpose)
+                    completedCaptureReturnGeneration = reusedGeneration
+                    CaptureRuntime.update(reusedGeneration) { it.copy(phase=CapturePhase.CAPTURED,
+                        config=restored.config,accountRead=AccountSessionRuntime.session.state.value.lastRead,
+                        message="已恢复账号并读取学校资料。") }
+                    mutableState.update { it.copy(certificateSetup=CertificateSetupPhase.INSTALLED) }
+                    return@operation
+                }
+            }
             if (!certificateGate.accepts(setupGeneration) || !captureFlowActive) return@operation
             mutableState.update { it.copy(certificateSetup = CertificateSetupPhase.CHECKING) }
             val trusted = try { withContext(Dispatchers.IO) { certificates.isInstalled() } }
@@ -1187,9 +1227,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onForegroundReturned() {
-        if(io.github.ibudaoa.capture.CaptureReturnPolicy.shouldRelease(CaptureRuntime.state.value))CaptureVpnService.stopOwned(getApplication())
+        if(io.github.ibudaoa.capture.CaptureReturnPolicy.shouldRelease(CaptureRuntime.state.value))CaptureVpnService.finishOnReturn(getApplication())
         accountForeground=true
-        AccountSessionRuntime.session.onForeground()
         resumeAccount()
         mutableState.update { it.copy(session = it.session.onForegroundReturned()) }
     }

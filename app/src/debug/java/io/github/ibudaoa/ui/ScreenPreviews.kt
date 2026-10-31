@@ -35,7 +35,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 /** Fixed, invented data: never read device storage, construct a ViewModel or use a gateway. */
-private enum class PreviewScene { WARMUP, PREPARATION_RUNNING, PREPARATION_READY, PREPARATION_FAILED, PREPARATION_INTERRUPTED, CERTIFICATE_READY, CERTIFICATE_NOT_INSTALLED, CERTIFICATE_SAVE_FAILED, CERTIFICATE_CHECK_FAILED, RUN_READY, RUNNING, PAUSED, SCHOOL, SETTINGS, SETTINGS_DISCONNECTED }
+private enum class PreviewScene { WARMUP, PREPARATION_WAITING, PREPARATION_RUNNING, PREPARATION_READY, PREPARATION_FAILED, PREPARATION_INTERRUPTED, CERTIFICATE_READY, CERTIFICATE_NOT_INSTALLED, CERTIFICATE_SAVE_FAILED, CERTIFICATE_CHECK_FAILED, RUN_READY, RUNNING, PAUSED, SCHOOL, SETTINGS, SETTINGS_DISCONNECTED }
 
 private fun sampleState(scene: PreviewScene): AppState {
     if (scene == PreviewScene.WARMUP || scene == PreviewScene.SETTINGS_DISCONNECTED) return AppState(loaded = true)
@@ -52,7 +52,8 @@ private fun sampleState(scene: PreviewScene): AppState {
         val demoConfig = DiagnosticCodec.decode("""{"school_id":1,"term_id":1,"run_zone_id":1,
             "run_line_info":{"point_list":[
             {"id":"a","jingwei":"30.0,114.0","is_online":1,"type":2,"point_type":1},
-            {"id":"b","jingwei":"30.001,114.0","is_online":1,"type":2,"point_type":1}]}}""")
+            {"id":"b","jingwei":"30.001,114.0","is_online":1,"type":2,"point_type":1},
+            {"id":"c","jingwei":"30.002,114.0","is_online":1,"type":2,"point_type":1}]}}""")
         val plan = RoadBatchPlan.create(demoConfig, 1)
         val phase = when (scene) {
             PreviewScene.PREPARATION_READY -> RoadBatchPhase.COMPLETE
@@ -63,8 +64,10 @@ private fun sampleState(scene: PreviewScene): AppState {
         return AppState(loaded=true, capturedConfig=true, certificateTrusted=true, mapConsent=true,
             config=demoConfig, connectionEpoch=1, captureRevision=DiagnosticStore.CURRENT_CAPTURE_REVISION,
             busy=phase==RoadBatchPhase.RUNNING,
-            roadReport=RoadBatchReport(plan.scope, phase, plan.candidateCount, plan.requests.size,
-                if(phase==RoadBatchPhase.COMPLETE) plan.requests.map { RoadLinkSummary(it.fromId,it.toId) } else emptyList()),
+            roadReport=if(scene==PreviewScene.PREPARATION_WAITING) null else
+                RoadBatchReport(plan.scope, phase, plan.candidateCount, plan.requests.size,
+                    (if(phase==RoadBatchPhase.COMPLETE) plan.requests else plan.requests.take(1))
+                        .map { RoadLinkSummary(it.fromId,it.toId) }),
             roadEvidence=if(phase==RoadBatchPhase.COMPLETE) RoadEvidenceSnapshot(plan.scope, plan.requests.map {
                 CandidateRoadEvidence(it.fromId,it.toId,WalkingLeg(100.0,listOf(listOf(it.from,it.to)))) }) else null)
     }
@@ -98,6 +101,7 @@ private fun sampleState(scene: PreviewScene): AppState {
 @Preview(name = "深色", widthDp = 412, heightDp = 915, uiMode = Configuration.UI_MODE_NIGHT_YES, showSystemUi = true)
 private annotation class UiDevices
 
+@UiDevices @Composable private fun PreparationWaitingPreview() = ScreenPreview(PreviewScene.PREPARATION_WAITING)
 @UiDevices @Composable private fun PreparationRunningPreview() = ScreenPreview(PreviewScene.PREPARATION_RUNNING)
 @UiDevices @Composable private fun PreparationReadyPreview() = ScreenPreview(PreviewScene.PREPARATION_READY)
 @UiDevices @Composable private fun PreparationFailedPreview() = ScreenPreview(PreviewScene.PREPARATION_FAILED)

@@ -34,6 +34,9 @@ class MainActivity : ComponentActivity() {
     private val exportConnectionReport = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         uri?.let(model::exportConnectionReport)
     }
+    private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        requestVpnConsent()
+    }
     private val vpnPermission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == RESULT_OK) startCollector()
         else model.showMessage("未授予 VPN 连接权限，采集未启动。")
@@ -112,6 +115,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+    }
+
     override fun onStart() {
         super.onStart()
         model.onForegroundReturned()
@@ -120,13 +128,33 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         model.onAutomaticForegroundReturned()
+        val returnedGeneration=intent.getLongExtra("capture_return_generation",-1L)
+        if (returnedGeneration == io.github.ibudaoa.capture.CaptureRuntime.state.value.generation &&
+            io.github.ibudaoa.capture.CaptureRuntime.state.value.phase == io.github.ibudaoa.capture.CapturePhase.CAPTURED) {
+            android.util.Log.i("CaptureStartup","returned_foreground")
+        }
+        intent.removeExtra("capture_return_generation")
+        getSystemService(android.app.NotificationManager::class.java).cancel(CaptureVpnService.RETURN_NOTIFICATION_ID)
         model.refreshCertificateStatus()
         if (io.github.ibudaoa.capture.CaptureReturnPolicy.shouldRelease(io.github.ibudaoa.capture.CaptureRuntime.state.value)) {
-            CaptureVpnService.stopOwned(this)
+            CaptureVpnService.finishOnReturn(this)
         }
     }
 
     private fun requestVpn() {
+        if (!model.captureRequested) return
+        val prefs = getSharedPreferences("capture-notification", MODE_PRIVATE)
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED &&
+            !prefs.getBoolean("asked", false)) {
+            prefs.edit().putBoolean("asked",true).apply()
+            notificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            return
+        }
+        requestVpnConsent()
+    }
+
+    private fun requestVpnConsent() {
         if (!model.captureRequested) return
         try {
             val intent = VpnService.prepare(this)

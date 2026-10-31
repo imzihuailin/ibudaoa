@@ -43,6 +43,29 @@ internal object AccountReadProbe {
     private class Unsupported(val reason:AccountReadReason=AccountReadReason.INVALID_FORM) : Exception("Unsupported account check request")
     class HttpFailure : Exception("Account check HTTP failure")
 
+    /** At most one retry, exclusively for transport failures, with a fresh signed request. */
+    fun checkWithRetry(request: LocalRequest, response: ByteArray, nowSeconds: () -> Long, nonce: () -> Int,
+        isCancelled: () -> Boolean = { false }, onAccepted: ((LocalRequest) -> Unit)? = null,
+        send: (ByteArray) -> ByteArray): AccountReadResult {
+        var result = AccountReadResult(AccountReadOutcome.NETWORK_ERROR)
+        var previousNonce: Int? = null
+        var sent=0
+        val originalNonce = runCatching { parse(request.body)["nonce"]?.toIntOrNull() }.getOrNull()
+        try {
+            repeat(2) {
+                if (isCancelled()) return result.copy(independentRequests=sent)
+                var next = nonce()
+                while (next == previousNonce || next == originalNonce)
+                    next = 100_000 + (next - 100_000 + 1).mod(900_000)
+                previousNonce = next
+                result = check(request.copy(body=request.body.clone()), response, nowSeconds(), next, onAccepted, send)
+                sent+=result.independentRequests
+                if (result.outcome != AccountReadOutcome.NETWORK_ERROR) return result.copy(independentRequests=sent)
+            }
+            return result.copy(independentRequests=sent)
+        } finally { request.body.fill(0) }
+    }
+
     fun check(request: LocalRequest, originalResponse: ByteArray, nowSeconds: Long, nonce: Int,
         onAccepted: ((LocalRequest) -> Unit)? = null,
         send: (ByteArray) -> ByteArray): AccountReadResult {

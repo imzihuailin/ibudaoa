@@ -41,11 +41,14 @@ class ReadOnlyProxy(
     private val workers = ThreadPoolExecutor(4, 4, 0, TimeUnit.SECONDS, ArrayBlockingQueue(8))
     @Volatile private var closed = false
     private val accountProbeClaimed=AtomicBoolean(false)
+    private val responses = CaptureResponseQueue()
+    private val probes = ConcurrentHashMap.newKeySet<HttpsURLConnection>()
+    @Volatile private var accepting = true
     private val hopHeaders=setOf("host","connection","proxy-connection","content-length","transfer-encoding",
         "accept-encoding","keep-alive","te","trailer","upgrade","proxy-authorization")
 
     fun serve() {
-        while (!closed) {
+        while (accepting && !closed) {
             val socket = try { server.accept() } catch (_: Exception) { break }
             sockets.add(socket)
             try { workers.execute { handle(socket) } }
@@ -81,11 +84,11 @@ class ReadOnlyProxy(
                 } finally { request.body.fill(0) }
             }
         } catch (_: SSLException) {
-            if (!closed) onProblem(CaptureProblem.TLS)
+            if (!closed && accepting) onProblem(CaptureProblem.TLS)
         } catch (_: CaptureProtocolException) {
-            if (!closed) onProblem(CaptureProblem.REQUEST_FORMAT)
+            if (!closed && accepting) onProblem(CaptureProblem.REQUEST_FORMAT)
         } catch (_: Exception) {
-            if (!closed) onProblem(CaptureProblem.NETWORK)
+            if (!closed && accepting) onProblem(CaptureProblem.NETWORK)
         } finally {
             sockets.remove(socket)
             runCatching { socket.close() }
@@ -118,6 +121,15 @@ class ReadOnlyProxy(
             val stream = if (status < 400) connection.inputStream else connection.errorStream
             val raw = stream?.use(::bounded) ?: ByteArray(0)
             try {
+                if (!closed && accepting && request.target in setOf(ReadOnlyPolicy.BEFORE_RUN, ReadOnlyPolicy.USER_PROFILE, AccountProtocol.REFRESH)) {
+                    val ownedRequest = request.copy(body = request.body.clone())
+                    val ownedResponse = raw.clone()
+                    val encoding = connection.contentEncoding
+                    responses.submit(action = {
+                        if (!closed) try { processResponse(ownedRequest, ownedResponse, status, encoding) }
+                        catch (_: Exception) { if (!closed) onProblem(CaptureProblem.INVALID_RESPONSE) }
+                    }, wipe = { ownedRequest.body.fill(0); ownedResponse.fill(0) })
+                }
                 output.write("HTTP/1.1 $status Upstream\r\n".toByteArray())
                 connection.headerFields.forEach { (key, values) ->
                     if (key != null && key.lowercase() !in hop) values.forEach { value ->
@@ -126,8 +138,13 @@ class ReadOnlyProxy(
                 }
                 output.write("Content-Length: ${raw.size}\r\nConnection: close\r\n\r\n".toByteArray())
                 output.write(raw); output.flush()
+            } finally { raw.fill(0) }
+        } finally { request.body.fill(0);upstream.remove(connection); connection.disconnect() }
+    }
+
+    private fun processResponse(request: LocalRequest, raw: ByteArray, status: Int, encoding: String?) {
                 if (request.target in setOf(ReadOnlyPolicy.BEFORE_RUN, ReadOnlyPolicy.USER_PROFILE,AccountProtocol.REFRESH) && status == 200 && !closed) {
-                    val bytes = when (connection.contentEncoding?.lowercase()) {
+                    val bytes = when (encoding?.lowercase()) {
                         null, "identity" -> raw
                         "gzip" -> if (request.target == ReadOnlyPolicy.USER_PROFILE)
                             runCatching { GZIPInputStream(raw.inputStream()).use(::bounded) }.getOrNull()
@@ -137,12 +154,14 @@ class ReadOnlyProxy(
                     if (bytes != null) try {
                         if(accountMaintenance && request.target in setOf(ReadOnlyPolicy.BEFORE_RUN,AccountProtocol.REFRESH)) {
                             onAccountProtocol?.invoke(request,bytes)
+                            if (request.target == ReadOnlyPolicy.BEFORE_RUN) onBeforeRun(bytes)
                         } else if (request.target == ReadOnlyPolicy.BEFORE_RUN) onBeforeRun(bytes) else {
                             if (!accountCheckOnly) onAccountProfile(bytes)
                             if (accountCheckOnly && accountProbeClaimed.compareAndSet(false,true) && !closed) {
                                 onAccountProfile(bytes)
-                                val result=AccountReadProbe.check(request,bytes,System.currentTimeMillis()/1000,
-                                    100_000+SecureRandom().nextInt(900_000),onAccepted={ accepted ->
+                                val result=AccountReadProbe.checkWithRetry(request,bytes,
+                                    nowSeconds={ System.currentTimeMillis()/1000 }, nonce={ 100_000+SecureRandom().nextInt(900_000) },
+                                    isCancelled={closed}, onAccepted={ accepted ->
                                         if(!closed) onAcceptedAccount?.invoke(accepted)
                                     }) { body -> probeProfile(body,request) }
                                 if (!closed) onAccountRead(result)
@@ -156,8 +175,6 @@ class ReadOnlyProxy(
                     accountProbeClaimed.compareAndSet(false, true) && !closed) {
                     onAccountRead(AccountReadResult(AccountReadOutcome.HTTP_ERROR))
                 }
-            } finally { raw.fill(0) }
-        } finally { request.body.fill(0);upstream.remove(connection); connection.disconnect() }
     }
 
     /** A separate client request to one exact read endpoint; no session, retry, redirect or refresh. */
@@ -165,7 +182,7 @@ class ReadOnlyProxy(
         if (closed) throw AccountReadProbe.HttpFailure()
         val connection=URL("https://${ReadOnlyPolicy.HOST}${ReadOnlyPolicy.USER_PROFILE}")
             .openConnection(Proxy.NO_PROXY) as HttpsURLConnection
-        upstream.add(connection)
+        probes.add(connection)
         try {
             if (closed) throw AccountReadProbe.HttpFailure()
             connection.instanceFollowRedirects=false;connection.useCaches=false
@@ -183,7 +200,7 @@ class ReadOnlyProxy(
                 "gzip" -> GZIPInputStream(connection.inputStream).use(::bounded)
                 else -> throw AccountReadProbe.HttpFailure()
             }
-        } finally { upstream.remove(connection);connection.disconnect() }
+        } finally { probes.remove(connection);connection.disconnect() }
     }
 
     private fun bounded(input: InputStream): ByteArray {
@@ -204,11 +221,23 @@ class ReadOnlyProxy(
         output.write(bytes); output.flush()
     }
 
-    override fun close() {
-        closed = true
+    /** Stop network interception immediately; process only already received response copies. */
+    fun finishReceived(): Boolean {
+        accepting = false
         runCatching { server.close() }
         sockets.forEach { runCatching { it.close() } }
         upstream.forEach { runCatching { it.disconnect() } }
+        return responses.drain(45)
+    }
+
+    override fun close() {
+        closed = true
+        accepting = false
+        responses.cancel()
+        runCatching { server.close() }
+        sockets.forEach { runCatching { it.close() } }
+        upstream.forEach { runCatching { it.disconnect() } }
+        probes.forEach { runCatching { it.disconnect() } }
         workers.shutdownNow()
     }
 }

@@ -231,4 +231,34 @@ class AccountReadProbeTest {
         assertFalse(DiagnosticCodec.encode(imported).contains("account_read_check"))
         assertNull(AccountReadReport.summary(state.copy(purpose=CapturePurpose.CONFIG)))
     }
+    @Test fun `transport failure retries once with distinct fresh signed nonce`() {
+        var calls=0; val nonces=mutableListOf<String>(); var accepted=0
+        val original=request()
+        val result=AccountReadProbe.checkWithRetry(original,response(),{1793000100},{123456},onAccepted={accepted++}) { body ->
+            val values=fields(body);nonces.add(values.getValue("nonce"))
+            assertEquals(sign(values),values["sign"])
+            if(calls++==0) throw java.io.IOException("fake timeout")
+            response()
+        }
+        assertTrue(result.readAccepted);assertEquals(2,calls);assertEquals(1,accepted)
+        assertEquals(2,nonces.distinct().size);assertFalse(nonces.contains("123456"))
+    }
+    @Test fun `HTTP rejection identity failure and cancellation do not retry`() {
+        var calls=0
+        val rejected=AccountReadProbe.checkWithRetry(request(),response(),{1793000100},{654321}) {
+            calls++;throw AccountReadProbe.HttpFailure()
+        }
+        assertEquals(AccountReadOutcome.HTTP_ERROR,rejected.outcome);assertEquals(1,calls)
+        calls=0
+        AccountReadProbe.checkWithRetry(request(),response(),{1793000100},{654321},isCancelled={true}) {calls++;response()}
+        assertEquals(0,calls)
+        AccountReadProbe.checkWithRetry(request(),response(),{1793000100},{654321}) {calls++;response("43")}
+        assertEquals(1,calls)
+    }
+    @Test fun `persistent transport failure is bounded to two independent reads`() {
+        var calls=0
+        val result=AccountReadProbe.checkWithRetry(request(),response(),{1793000100},{654321}) {calls++;throw java.io.IOException()}
+        assertEquals(AccountReadOutcome.NETWORK_ERROR,result.outcome);assertEquals(2,calls)
+    }
+
 }
