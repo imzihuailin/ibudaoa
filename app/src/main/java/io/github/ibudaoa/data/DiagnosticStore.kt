@@ -20,6 +20,8 @@ import kotlinx.serialization.json.longOrNull
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.Dispatchers
 
 private val Context.diagnosticStore by preferencesDataStore("diagnostic")
 
@@ -84,7 +86,7 @@ class DiagnosticStore internal constructor(private val store: DataStore<Preferen
             mapConsent = preferences[mapConsentKey] == true,
             capturedAtEpochSecond = preferences[capturedAtKey] ?: 0,
         )
-    }
+    }.flowOn(Dispatchers.Default)
 
     /** Upgrade old installations from complete, scoped evidence before publishing initial UI state. */
     suspend fun migratePreparationCompletion() {

@@ -61,6 +61,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -104,6 +105,32 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+internal data class RoadPreparationInputs(
+    val config: io.github.ibudaoa.diagnostics.DiagnosticConfig?, val epoch: Long,
+    val report: io.github.ibudaoa.roads.RoadBatchReport?,
+    val evidence: io.github.ibudaoa.roads.RoadEvidenceSnapshot?, val captured: Boolean, val revision: Int,
+) {
+    companion object {
+        fun from(state: AppState) = RoadPreparationInputs(state.config, state.connectionEpoch, state.roadReport,
+            state.roadEvidence, state.capturedConfig, state.captureRevision)
+    }
+}
+private data class RoadPreparationView(val inputs: RoadPreparationInputs,
+    val report: io.github.ibudaoa.roads.RoadBatchReport?, val ready: Boolean)
+
+@Composable
+private fun rememberRoadPreparation(state: AppState): RoadPreparationView? {
+    val inputs = RoadPreparationInputs.from(state)
+    val result by produceState<RoadPreparationView?>(null, inputs) {
+        value = withContext(Dispatchers.Default) {
+            RoadPreparationView(inputs, state.preparationRoadReport, state.preparationRoadsReady)
+        }
+    }
+    return result?.takeIf { it.inputs == inputs }
+}
 
 internal enum class Destination(val label: String, val icon: ImageVector) {
     RUN("跑步", Icons.AutoMirrored.Filled.DirectionsRun),
@@ -138,6 +165,7 @@ fun IbudaoaApp(
     onCheckUpdates: () -> Unit,
     onDiagnosticMode: (Boolean) -> Unit,
 ) {
+    val roads = rememberRoadPreparation(state)
     var showRoadDirections by rememberSaveable { mutableStateOf(false) }
     var directionIndex by rememberSaveable { mutableStateOf(0) }
     var showManualGaps by rememberSaveable { mutableStateOf(false) }
@@ -161,10 +189,10 @@ fun IbudaoaApp(
     }
     val foreground = LocalLifecycleOwner.current.lifecycle.currentStateAsState().value.isAtLeast(Lifecycle.State.RESUMED)
     val warmupReason = WarmupPolicy.reason(state)
-    LaunchedEffect(warmupReason, foreground, state.accountSession.phase, showWarmup) {
-        if (foreground && warmupReason != null && handledWarmupReason != warmupReason.name) {
+    LaunchedEffect(warmupReason, foreground, state.accountSession.phase, showWarmup, roads) {
+        if (roads != null && foreground && warmupReason != null && handledWarmupReason != warmupReason.name) {
             handledWarmupReason = warmupReason.name
-            finishAfterLocation = warmupReason == WarmupReason.LOCATION && state.preparationRoadsReady
+            finishAfterLocation = warmupReason == WarmupReason.LOCATION && roads?.ready == true
             showWarmup = true
         } else if (WarmupPolicy.recovered(state) && !showWarmup) {
             handledWarmupReason = null
@@ -174,12 +202,12 @@ fun IbudaoaApp(
     val roadScopeKey = "${state.connectionEpoch}:${state.config.hashCode()}"
     val automaticStep = PreparationStepResolver.next(state.capturedConfig && !WarmupPolicy.needsLogin(state), state.captureRevision,
         DiagnosticStore.CURRENT_CAPTURE_REVISION, state.capture.active, BuildConfig.MAP_KEY_CONFIGURED,
-        state.mapConsent, state.preparationRoadReport?.phase, state.busy,
-        state.preparationRoadReport?.reviewRevision ?: io.github.ibudaoa.roads.RoadBatchReport.CURRENT_REVIEW_REVISION,
-        state.preparationRoadsReady, state.locationGranted)
+        state.mapConsent, roads?.report?.phase, state.busy,
+        roads?.report?.reviewRevision ?: io.github.ibudaoa.roads.RoadBatchReport.CURRENT_REVIEW_REVISION,
+        roads?.ready == true, state.locationGranted)
     LaunchedEffect(showWarmup, foreground, state.loaded, state.capture.active, state.capturedConfig, state.captureRevision,
         state.busy, state.mapConsent, state.locationGranted, state.locationStartupPending, state.roadReport, state.certificateSetup, state.preparationError,
-        state.preparationCompleted, state.accountStorageLoaded, state.accountSession.phase) {
+        state.preparationCompleted, state.accountStorageLoaded, state.accountSession.phase, roads) {
         if (showWarmup && state.loaded && !state.locationStartupPending && foreground && !state.busy && !state.capture.active && state.capture.phase != CapturePhase.ERROR &&
             state.capturedConfig && state.captureRevision == DiagnosticStore.CURRENT_CAPTURE_REVISION &&
             !needsCertificateSetup(state.certificateSetup, state.capturedConfig, state.certificateTrusted, false) &&
@@ -190,14 +218,14 @@ fun IbudaoaApp(
                 attemptedLocation = true
                 if (locationPermission.canRequestAutomatically) locationPermission.request()
             }
-        } else if ((showWarmup || state.preparationCompleted) && WarmupPolicy.ready(state) && foreground && state.locationGranted && state.mapConsent &&
+        } else if (roads != null && (showWarmup || state.preparationCompleted) && WarmupPolicy.ready(state) && foreground && state.locationGranted && state.mapConsent &&
             !state.busy && !state.capture.active && state.capture.phase != CapturePhase.ERROR &&
             !needsCertificateSetup(state.certificateSetup, state.capturedConfig, state.certificateTrusted, false)) {
-            if (finishAfterLocation && state.preparationRoadsReady) {
+            if (finishAfterLocation && roads.ready) {
                 finishAfterLocation = false
                 showWarmup = false
             } else if (automaticStep == PreparationStep.CHECK_ROADS && !WarmupPolicy.needsLogin(state) && attemptedRoadScope != roadScopeKey && state.preparationError == null &&
-                state.preparationRoadReport?.phase !in setOf(RoadBatchPhase.FAILED, RoadBatchPhase.INTERRUPTED)) {
+                roads.report?.phase !in setOf(RoadBatchPhase.FAILED, RoadBatchPhase.INTERRUPTED)) {
                 attemptedRoadScope = roadScopeKey
                 onAcknowledgePreparation()
             }
@@ -343,7 +371,8 @@ fun IbudaoaApp(
         WarmupDialog(
             state = state,
             onContinue = {
-                if (!WarmupPolicy.needsLogin(state) && state.locationGranted && state.mapConsent && state.preparationRoadsReady && !state.busy && !state.capture.active && state.capture.phase != CapturePhase.ERROR &&
+                if (roads == null) return@WarmupDialog
+                if (!WarmupPolicy.needsLogin(state) && state.locationGranted && state.mapConsent && roads?.ready == true && !state.busy && !state.capture.active && state.capture.phase != CapturePhase.ERROR &&
                     state.capturedConfig && state.captureRevision == DiagnosticStore.CURRENT_CAPTURE_REVISION) {
                     showWarmup = false
                 } else if (!WarmupPolicy.needsLogin(state) && state.capturedConfig && !state.capture.active && (!state.locationGranted || !state.mapConsent) &&
@@ -495,6 +524,7 @@ internal fun MapPage(
     mapActive: Boolean,
     mapBackground: (@Composable () -> Unit)? = null,
 ) {
+    val roads = rememberRoadPreparation(state)
     var expanded by remember { mutableStateOf(false) }
     var confirmAutomaticFinish by rememberSaveable { mutableStateOf(false) }
     var confirmArchive by rememberSaveable { mutableStateOf(false) }
@@ -569,7 +599,7 @@ internal fun MapPage(
                     }
                 }
                 if (runningPage && state.preparationCompleted) {
-                    val preparationFailure = state.preparationError ?: when (state.preparationRoadReport?.phase) {
+                    val preparationFailure = state.preparationError ?: when (roads?.report?.phase) {
                         RoadBatchPhase.FAILED -> "道路核对未完成，请点击完成准备后重试。"
                         RoadBatchPhase.INTERRUPTED -> "道路核对已中断，请点击完成准备后重试。"
                         else -> null
@@ -784,15 +814,16 @@ private fun ToolCard(title: String, subtitle: String, icon: ImageVector, trailin
 
 @Composable
 internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: () -> Unit) {
+    val preparation = rememberRoadPreparation(state)
     val setup = state.certificateSetup
     val certificateStep = needsCertificateSetup(setup, state.capturedConfig, state.certificateTrusted, state.capture.active)
     val capture = state.capture
-    val roads = state.preparationRoadReport
+    val roads = preparation?.report
     val needsCapture = WarmupPolicy.needsLogin(state) || !state.capturedConfig || state.captureRevision != DiagnosticStore.CURRENT_CAPTURE_REVISION
     val accountReady = !certificateStep && !capture.active && !needsCapture && capture.phase != CapturePhase.ERROR
     val locationStep = accountReady && (!state.locationGranted || !state.mapConsent)
     val roadStep = accountReady && !locationStep
-    val ready = roadStep && state.preparationRoadsReady && !state.busy
+    val ready = roadStep && preparation?.ready == true && !state.busy
     val failed = roadStep && !state.busy && (state.preparationError != null ||
         roads?.phase in setOf(RoadBatchPhase.FAILED, RoadBatchPhase.INTERRUPTED, RoadBatchPhase.COMPLETE) && !ready)
     val current = when { certificateStep -> 0; !accountReady -> 1; locationStep -> 2; ready -> 4; else -> 3 }
@@ -831,7 +862,7 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
     }
     val enabled = !state.busy && capture.phase !in setOf(CapturePhase.STARTING, CapturePhase.FINALIZING) &&
         setup !in setOf(CertificateSetupPhase.CHECKING, CertificateSetupPhase.SAVING) &&
-        (!roadStep || ready || failed)
+        (!roadStep || preparation != null && (ready || failed))
     val content: @Composable () -> Unit = {
         Surface(Modifier.padding(horizontal = 16.dp, vertical = 24.dp).widthIn(max = 560.dp)
             .fillMaxWidth().fillMaxHeight(0.78f), shape = RoundedCornerShape(28.dp),

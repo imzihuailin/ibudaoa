@@ -684,52 +684,52 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val config=snapshot.config ?: return
         val graph=snapshot.roadGraph ?: return
         val preview=snapshot.localPreview ?: return
-            try {
-                val (updated,summary)=withContext(Dispatchers.Default) {
-                    LocalRoutePreviewEngine.validateAndBuild(config,snapshot.capturedConfig,graph,preview,snapshot.displayFix,
-                        Instant.now(),SystemClock.elapsedRealtime(),ZoneId.of("Asia/Shanghai"),AmapDistance())
-                }
-                if (state.value.config != config || state.value.roadGraph !== graph || state.value.localPreview !== preview) return
-                val after=LocalRoutePreviewEngine.reviewProblem(config,state.value.capturedConfig,graph,preview,state.value.displayFix,
+        try {
+            val (updated,summary)=withContext(Dispatchers.Default) {
+                LocalRoutePreviewEngine.validateAndBuild(config,snapshot.capturedConfig,graph,preview,snapshot.displayFix,
                     Instant.now(),SystemClock.elapsedRealtime(),ZoneId.of("Asia/Shanghai"),AmapDistance())
-                if (after != null) {
-                    if(preparingRun) return blockRunningPlan(if(after in setOf(PreviewProblem.LOCATION_REQUIRED,PreviewProblem.POSITION_CHANGED))
-                        RunningPlanProblem.LOCATION else RunningPlanProblem.ROADS)
-                    mutableState.update { it.copy(localPreview=null,previewSummary=LocalPreviewSummary(graph.scope,PreviewPhase.BLOCKED,
-                        preview.points.selectedIds.size,problem=after)) }
-                    showMessage(after.label)
-                    return
-                }
-                if(preparingRun) {
-                    val grant=runGrant
-                    if(grant==null || !AccountSessionRuntime.session.isCurrent(grant,Instant.now().epochSecond))
-                        return blockRunningPlan(RunningPlanProblem.ONLINE_EXPIRED)
-                    val route=updated?.route ?: run {
-                        mutableState.update { it.copy(localPreview=updated, previewSummary=summary) }
-                        val reason = when (summary.routeProblem) {
-                            io.github.ibudaoa.roads.RoutePlanProblem.NO_OBSERVED_ROUTE -> RunningPlanProblem.ROAD_UNREACHABLE
-                            io.github.ibudaoa.roads.RoutePlanProblem.NO_DISTANCE_MARGIN -> RunningPlanProblem.ROAD_DISTANCE
-                            io.github.ibudaoa.roads.RoutePlanProblem.SEARCH_LIMIT -> RunningPlanProblem.ROAD_CALCULATION
-                            io.github.ibudaoa.roads.RoutePlanProblem.START_NOT_ON_ROAD -> RunningPlanProblem.ACCESS_ROUTE
-                            else -> RunningPlanProblem.ROADS
-                        }
-                        return blockRunningPlan(reason)
-                    }
-                    val (plan,planSummary)=RunningPlanRules.create(config,route,Instant.now(),ZoneId.of("Asia/Shanghai"))
-                    preparedRunningPlan=plan;preparingRun=false
-                    mutableState.update { it.copy(localPreview=updated,previewSummary=summary,runningPlanSummary=planSummary) }
-                    showMessage(planSummary.problem?.label ?: "本次距离、配速和路线计划已生成，尚未创建运动。")
-                    return
-                }
-                mutableState.update { it.copy(localPreview=updated,previewSummary=summary) }
-                showMessage(if (updated?.route != null) "本地路线草稿已生成，尚未开始运动。"
-                    else summary.problem?.label ?: "当前道路尚不能生成完整草稿。")
-            } catch (e: CancellationException) { throw e }
-            catch (_: Exception) {
-                if(preparingRun) blockRunningPlan(RunningPlanProblem.ROADS)
-                else { mutableState.update { it.copy(localPreview=null) };showMessage("本地路线计算未完成，请重试。") }
             }
-            finally { mutableState.update { it.copy(busy=false) }; previewJob=null }
+            if (state.value.config != config || state.value.roadGraph !== graph || state.value.localPreview !== preview) return
+            val after=LocalRoutePreviewEngine.reviewProblem(config,state.value.capturedConfig,graph,preview,state.value.displayFix,
+                Instant.now(),SystemClock.elapsedRealtime(),ZoneId.of("Asia/Shanghai"),AmapDistance())
+            if (after != null) {
+                if(preparingRun) return blockRunningPlan(if(after in setOf(PreviewProblem.LOCATION_REQUIRED,PreviewProblem.POSITION_CHANGED))
+                    RunningPlanProblem.LOCATION else RunningPlanProblem.ROADS)
+                mutableState.update { it.copy(localPreview=null,previewSummary=LocalPreviewSummary(graph.scope,PreviewPhase.BLOCKED,
+                    preview.points.selectedIds.size,problem=after)) }
+                showMessage(after.label)
+                return
+            }
+            if(preparingRun) {
+                val grant=runGrant
+                if(grant==null || !AccountSessionRuntime.session.isCurrent(grant,Instant.now().epochSecond))
+                    return blockRunningPlan(RunningPlanProblem.ONLINE_EXPIRED)
+                val route=updated?.route ?: run {
+                    mutableState.update { it.copy(localPreview=updated, previewSummary=summary) }
+                    val reason = when (summary.routeProblem) {
+                        io.github.ibudaoa.roads.RoutePlanProblem.NO_OBSERVED_ROUTE -> RunningPlanProblem.ROAD_UNREACHABLE
+                        io.github.ibudaoa.roads.RoutePlanProblem.NO_DISTANCE_MARGIN -> RunningPlanProblem.ROAD_DISTANCE
+                        io.github.ibudaoa.roads.RoutePlanProblem.SEARCH_LIMIT -> RunningPlanProblem.ROAD_CALCULATION
+                        io.github.ibudaoa.roads.RoutePlanProblem.START_NOT_ON_ROAD -> RunningPlanProblem.ACCESS_ROUTE
+                        else -> RunningPlanProblem.ROADS
+                    }
+                    return blockRunningPlan(reason)
+                }
+                val (plan,planSummary)=RunningPlanRules.create(config,route,Instant.now(),ZoneId.of("Asia/Shanghai"))
+                preparedRunningPlan=plan;preparingRun=false
+                mutableState.update { it.copy(localPreview=updated,previewSummary=summary,runningPlanSummary=planSummary) }
+                showMessage(planSummary.problem?.label ?: "本次距离、配速和路线计划已生成，尚未创建运动。")
+                return
+            }
+            mutableState.update { it.copy(localPreview=updated,previewSummary=summary) }
+            showMessage(if (updated?.route != null) "本地路线草稿已生成，尚未开始运动。"
+                else summary.problem?.label ?: "当前道路尚不能生成完整草稿。")
+        } catch (e: CancellationException) { throw e }
+        catch (_: Exception) {
+            if(preparingRun) blockRunningPlan(RunningPlanProblem.ROADS)
+            else { mutableState.update { it.copy(localPreview=null) };showMessage("本地路线计算未完成，请重试。") }
+        }
+        finally { mutableState.update { it.copy(busy=false) }; previewJob=null }
     }
 
     fun acknowledgePreparation() = operation {
