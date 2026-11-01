@@ -12,7 +12,7 @@ import kotlin.math.max
 /** A plan is not a platform task, uploaded trajectory or valid record. */
 enum class RunningPlanPhase { IDLE, CHECKING, SYNCING, WAITING_LOCATION, CONNECTING_ROUTE, REVIEW_ORIGIN, PLANNED, BLOCKED, INTERRUPTED }
 enum class RunningPlanProblem(val label:String) {
-    ACCOUNT("登录或在线核对尚未完成"), ONLINE_EXPIRED("在线核对已过期，请重新生成计划"),
+    ACCOUNT("登录或在线核对尚未完成"), ONLINE_EXPIRED("本次跑前核验已失效，请重新生成计划"),
     CONFIGURATION_CHANGED("学校、跑区或道路配置已变化，原有数据已保留"),
     SCHOOL_RULES("当前学校规则分支尚未适配"), TERM("当前不在学期范围内"),
     WEEK("今天不符合星期规则，或星期配置未知"), DATE_RULE("当前日期规则尚未完整适配"),

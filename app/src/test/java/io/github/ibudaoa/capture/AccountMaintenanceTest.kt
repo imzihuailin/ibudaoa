@@ -290,12 +290,13 @@ class AccountMaintenanceTest {
         assertEquals(listOf(ReadOnlyPolicy.USER_PROFILE),c.paths)
         assertEquals(AccountRefreshOutcome.NOT_AVAILABLE,s.state.value.refreshOutcome)
     }
-    @Test fun `verified school grant is private current short lived and invalid after leaving foreground`() {
+    @Test fun `verified school grant remains current in foreground and invalid after leaving foreground`() {
         val s=f.session(MaintenanceFixture.Store())
         val c=MaintenanceFixture.Connection { if(it.target==ReadOnlyPolicy.USER_PROFILE)f.success else f.fresh() }
         s.read(c,1793000100,654321,DiagnosticCodec.decode(f.config))
         val grant=s.verifiedSchool(1793000100)!!
-        assertTrue(s.isCurrent(grant,1793000100));assertFalse(s.isCurrent(grant,1793000221))
+        assertTrue(s.isCurrent(grant,1793000100));assertTrue(s.isCurrent(grant,1793000221))
+        assertTrue(s.isCurrent(grant,1793003700))
         val forged=VerifiedSchoolConfig(grant.config,grant.baseline,grant.issuedAt,grant.revision)
         assertFalse(s.isCurrent(forged,1793000100))
         s.onBackground();assertFalse(s.isCurrent(grant,1793000100))

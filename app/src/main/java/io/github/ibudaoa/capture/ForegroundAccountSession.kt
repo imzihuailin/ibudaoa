@@ -72,7 +72,7 @@ internal class ForegroundAccountSession(private val clock:()->Long={System.nanoT
     private var verifiedSchool:VerifiedSchoolConfig?=null
     @Synchronized fun verifiedSchool(nowSeconds:Long):VerifiedSchoolConfig? = verifiedSchool?.takeIf { isCurrent(it,nowSeconds) }
     @Synchronized fun isCurrent(value:VerifiedSchoolConfig,nowSeconds:Long):Boolean = foreground && verifiedSchool===value &&
-        credentialRevision==value.revision && nowSeconds-value.issuedAt in 0..120
+        credentialRevision==value.revision
     @Synchronized fun acknowledgeSchool(value:VerifiedSchoolConfig,nowSeconds:Long) {
         if(isCurrent(value,nowSeconds)) {
             val reviewed=LivePreparation.review(value.config,value.config,
