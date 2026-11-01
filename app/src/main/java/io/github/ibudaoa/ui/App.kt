@@ -68,8 +68,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.platform.LocalUriHandler
 import io.github.ibudaoa.maps.CampusMap
-import io.github.ibudaoa.maps.DisplayFix
-import io.github.ibudaoa.maps.LocationDiagnostics
 import io.github.ibudaoa.preview.PreviewPhase
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -127,16 +125,11 @@ fun IbudaoaApp(
     onMapConsent: (Boolean) -> Unit,
     onLocationStartupHandled: () -> Unit,
     onReconnect: () -> Unit,
-    onAccountReadCheck: () -> Unit,
-    onVerifyAccountSession: () -> Unit,
-    onDisconnectAccountSession: () -> Unit,
     onCheckRoadGaps: () -> Unit,
     onSetManualGap: (Int, Boolean) -> Unit,
     onSetReviewedDirection: (Pair<String, String>, Boolean) -> Unit,
     onConfirmAllDirections: () -> Unit,
     onConfirmAllRoadConnections: () -> Unit,
-    onDisplayFix: (DisplayFix?) -> Unit,
-    onLocationDiagnostics: (LocationDiagnostics) -> Unit,
     onPrepareLocalPreview: () -> Unit,
     onPrepareRunningPlan: () -> Unit,
     onAutomaticAction: () -> Unit,
@@ -147,7 +140,6 @@ fun IbudaoaApp(
     onConfirmPreviewOrigin: () -> Unit,
     onClosePreviewReview: () -> Unit,
 ) {
-    var showAccountCheck by rememberSaveable { mutableStateOf(false) }
     var showRoadDirections by rememberSaveable { mutableStateOf(false) }
     var directionIndex by rememberSaveable { mutableStateOf(0) }
     var showManualGaps by rememberSaveable { mutableStateOf(false) }
@@ -226,59 +218,22 @@ fun IbudaoaApp(
                     onCheckRoadGaps = { showGapCheck = true },
                     onReviewRoadGaps = { manualIndex = 0; showManualGaps = true },
                     onReviewRoadDirections = { directionIndex = 0; showRoadDirections = true },
-                    onDisplayFix = onDisplayFix,
-                    onLocationDiagnostics = onLocationDiagnostics,
                     onPrepareLocalPreview = onPrepareLocalPreview,
                     onPrepareRunningPlan = onPrepareRunningPlan,
                     onAutomaticAction = onAutomaticAction,
                     onFinishAutomatic = onFinishAutomatic,
                     onArchiveAutomatic = onArchiveAutomatic,
-                    mapActive = !showWarmup && !showSummary && !confirmClear && !showGapCheck && !showManualGaps && !showRoadDirections && !showAccountCheck && !reviewingOrigin && !state.capture.active,
+                    mapActive = !showWarmup && !showSummary && !confirmClear && !showGapCheck && !showManualGaps && !showRoadDirections && !reviewingOrigin && !state.capture.active,
                 )
                 Destination.SETTINGS -> SettingsPage(
                     state = state,
                     onExit = { onCancelCapture(); onClear() },
                     onConnect = { showWarmup = true; onReconnect() },
-                    onAccountCheck = { showWarmup=false;showAccountCheck=true },
                     onMessage = onMessage,
                     onDisableMap = { onMapConsent(false) }, onCheckUpdates=onCheckUpdates, onDiagnosticMode=onDiagnosticMode,
                 )
             }
         }
-    }
-
-    if (showAccountCheck) {
-        val check=state.capture.takeIf { it.purpose==CapturePurpose.ACCOUNT_SESSION }
-        val done=state.accountSession.available || state.accountSession.credentialsPersisted || check?.phase in setOf(CapturePhase.CAPTURED,CapturePhase.ERROR,CapturePhase.CANCELLED)
-        AlertDialog(onDismissRequest={ onCancelCapture();showAccountCheck=false },
-            title={ Text("账号连接") },
-            text={ Column(verticalArrangement=Arrangement.spacedBy(10.dp)) {
-                Text(if (check?.active==true) check.message
-                    else "首次或补齐维护材料时，官方先打开“我的”，再进入校园跑准备页，不点击开始。材料加密保存在本机，以后自动恢复和核验。")
-                Text("切换应用、导出或重启会保留登录，返回前台后重新核验。临时连接最多两分钟，学校配置和道路确认保持，不启动运动。")
-                Text(state.accountSession.label)
-                Text(state.accountSession.preparation.label)
-                Text(when(state.accountSession.refreshState) {
-                    io.github.ibudaoa.capture.AccountRefreshState.IN_FLIGHT -> "续期结果尚未确认，已停止自动重复请求。"
-                    io.github.ibudaoa.capture.AccountRefreshState.UNVERIFIED -> "更新的登录已保存，等待核验。"
-                    io.github.ibudaoa.capture.AccountRefreshState.AVAILABLE -> "已保存续期材料，失效时有界自动续期。"
-                    io.github.ibudaoa.capture.AccountRefreshState.MISSING -> "当前尚无续期材料；已有有效登录仍保留。"
-                })
-                state.accountSession.lastRead?.let { Text(it.outcome.label) }
-                if(state.accountSession.available || state.accountSession.phase==io.github.ibudaoa.capture.AccountSessionPhase.STORAGE_ERROR)
-                    TextButton(onClick=onVerifyAccountSession,enabled=!state.busy) { Text("核对登录和跑前条件") }
-                if(state.accountSession.credentialsPersisted || state.accountSession.available) TextButton(onClick=onDisconnectAccountSession,enabled=!state.busy) { Text("退出已保存账号") }
-                if (done) TextButton(onClick=onAccountReadCheck,enabled=!state.busy) { Text("重新连接账号") }
-                check?.accountRead?.let { result ->
-                    Text(if (result.outcome==AccountReadOutcome.PASSED) "一次独立只读请求已通过。"
-                        else "${result.outcome.label}，请导出交回核对。")
-                }
-            } },
-            confirmButton={ TextButton(onClick={ if (check?.active==true || !done) onAccountReadCheck() else onExport() },
-                enabled=!state.busy && check?.phase!=CapturePhase.STARTING) {
-                Text(when { check?.active==true -> "返回官方应用"; done -> "导出会话结果"; else -> "连接账号" })
-            } },
-            dismissButton={ TextButton(onClick={ onCancelCapture();showAccountCheck=false }) { Text("关闭") } })
     }
 
     val originPreview = state.localPreview
@@ -287,7 +242,7 @@ fun IbudaoaApp(
             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
                 CampusMap(state.config,state.mapConsent,true,state.roadEvidence,null,
                     modifier=Modifier.fillMaxSize(),originProposal=originPreview.proposal,
-                    selectedIds=originPreview.points.selectedIds,onFix=onDisplayFix,onLocationDiagnostics=onLocationDiagnostics)
+                    selectedIds=originPreview.points.selectedIds)
                 Surface(Modifier.align(Alignment.TopCenter).fillMaxWidth(),color=MaterialTheme.colorScheme.surfaceContainer) {
                     Row(Modifier.statusBarsPadding().padding(12.dp),verticalAlignment=Alignment.CenterVertically) {
                         Text("核对预览起点",Modifier.weight(1f),style=MaterialTheme.typography.titleMedium)
@@ -552,8 +507,6 @@ internal fun MapPage(
     onCheckRoadGaps: () -> Unit,
     onReviewRoadGaps: () -> Unit,
     onReviewRoadDirections: () -> Unit,
-    onDisplayFix: (DisplayFix?) -> Unit,
-    onLocationDiagnostics: (LocationDiagnostics) -> Unit,
     onPrepareLocalPreview: () -> Unit,
     onPrepareRunningPlan: () -> Unit,
     onAutomaticAction: () -> Unit,
@@ -585,7 +538,7 @@ internal fun MapPage(
             state.automaticRoute ?: state.localPreview?.route ?: (state.routeResult as? io.github.ibudaoa.roads.RoutePlanResult.Draft)?.route,
             selectedIds=state.automaticRoute?.selectedIds ?: state.localPreview?.points?.selectedIds.orEmpty(),
             automaticDisplay=runningPage && state.automaticRun.phase!=io.github.ibudaoa.running.AutomaticRunPhase.IDLE,
-            automaticPosition=state.automaticPosition.takeIf { runningPage },onFix=onDisplayFix,onLocationDiagnostics=onLocationDiagnostics)
+            automaticPosition=state.automaticPosition.takeIf { runningPage })
         if (BuildConfig.MAP_KEY_CONFIGURED && state.mapConsent && state.config != null) {
             Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(
                 colors.background.copy(alpha = 0.80f), colors.background.copy(alpha = 0.15f),
@@ -714,6 +667,19 @@ internal fun MapPage(
                     if(auto.phase==io.github.ibudaoa.running.AutomaticRunPhase.INTERRUPTED && auto.pendingWrite=="FINISH" && !auto.recordBound)
                         TextButton(onClick={confirmArchive=true},enabled=!state.busy) { Text("官方无记录，处理本地任务") }
                     state.automaticFailureReason?.let { Text(it,style=MaterialTheme.typography.bodySmall) }
+                    if(auto.phase !in setOf(io.github.ibudaoa.running.AutomaticRunPhase.VALID,io.github.ibudaoa.running.AutomaticRunPhase.INVALID)) {
+                        auto.ruleProblems.sortedBy { it.ordinal }.forEach { Text(it.label,style=MaterialTheme.typography.bodySmall) }
+                        val issue=when {
+                            auto.problem?.startsWith("MATERIAL_")==true -> "提交材料未通过一致性检查，已保留原任务。"
+                            auto.problem=="PREPARATION_CHANGED" -> "运行准备已变化，原任务已保留，需先核对。"
+                            auto.problem=="REGISTRATION_TIME_MISMATCH" -> "手机与平台时间相差过大，已停止推进并保留原任务。"
+                            auto.problem in setOf("WRITE_RESULT_UNCERTAIN","ASSOCIATION_UNCERTAIN") -> "请求结果尚未确认，请先核对原任务。"
+                            auto.problem=="RECORD_MISMATCH" -> "返回记录与本次任务不匹配，尚未确认判定。"
+                            auto.problem=="RECORD_QUERY_FAILED" -> "暂未取得平台判定，请稍后核对。"
+                            else -> null
+                        }
+                        issue?.let { Text(it,style=MaterialTheme.typography.bodySmall) }
+                    }
                     if(auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.RUNNING,io.github.ibudaoa.running.AutomaticRunPhase.PAUSED))
                         TextButton(onClick={confirmAutomaticFinish=true},enabled=!state.busy) { Text("结束并提交本次记录") }
                 }
@@ -747,7 +713,7 @@ private fun Metric(label: String, value: String, modifier: Modifier = Modifier) 
 }
 
 @Composable
-internal fun SettingsPage(state: AppState, onExit: () -> Unit, onConnect: () -> Unit, onAccountCheck: () -> Unit, onMessage: (String) -> Unit, onDisableMap: () -> Unit, onCheckUpdates: () -> Unit, onDiagnosticMode: (Boolean) -> Unit) {
+internal fun SettingsPage(state: AppState, onExit: () -> Unit, onConnect: () -> Unit, onMessage: (String) -> Unit, onDisableMap: () -> Unit, onCheckUpdates: () -> Unit, onDiagnosticMode: (Boolean) -> Unit) {
     val profile = state.capture.profile?.takeIf {
         state.capturedConfig && state.capture.phase == CapturePhase.CAPTURED &&
             it.schoolName != null && it.schoolName == state.config?.schoolName
@@ -768,7 +734,6 @@ internal fun SettingsPage(state: AppState, onExit: () -> Unit, onConnect: () -> 
                 }
                 Text(if (state.capturedConfig) "${state.config?.schoolName ?: "学校名称待核对"}\n${state.config?.campusName ?: "跑区名称待核对"}" else "请先在官方应用登录，再连接读取学校配置。完整账号资料将在后续版本接入。",
                     style = MaterialTheme.typography.bodyMedium)
-                TextButton(onClick=onAccountCheck,enabled=!state.busy && !state.capture.active) { Text("账号连接") }
                 Text(state.accountSession.label,style=MaterialTheme.typography.bodySmall)
                 if (state.capture.purpose==CapturePurpose.ACCOUNT_READ_CHECK && state.capture.accountRead!=null) {
                     Text(when(state.capture.accountRead.outcome) {

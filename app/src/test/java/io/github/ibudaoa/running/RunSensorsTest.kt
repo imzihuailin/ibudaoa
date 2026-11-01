@@ -91,7 +91,7 @@ class RunSensorsTest {
     }
     @Test fun `export includes only bounded sensor counters and policy shapes without sensor vectors or positions`() {
         val sensors=RunSensorSummary(RunSensorPhase.STOPPED,true,false,true,true,3,3,10,10,2,0,true)
-        val requirements=RunRuntimeRequirements(RuntimeCheckShape.EMPTY_ARRAY,RuntimeCheckShape.EMPTY_ARRAY,true,true)
+        val requirements=RunRuntimeRequirements(RuntimeCheckShape.EMPTY_ARRAY,RuntimeCheckShape.EMPTY_ARRAY,true,true,RuntimeSwitch.DISABLED,RuntimeSwitch.DISABLED,RuntimeSwitch.ENABLED)
         val text=PreparationExport.encode(UploadFixture.config,1,1,null,sensors=sensors,requirements=requirements)
         val root=Json.parseToJsonElement(text).jsonObject
         val report=root.getValue("run_sensor_check").jsonObject
@@ -104,7 +104,7 @@ class RunSensorsTest {
     }
     @Test fun `diagnostic runtime support matches automatic execution for explicit empty marker`() {
         for(shape in listOf(RuntimeCheckShape.EMPTY_STRING,RuntimeCheckShape.NULL,RuntimeCheckShape.MISSING,RuntimeCheckShape.NONEMPTY_ARRAY)) {
-            val requirements=RunRuntimeRequirements(shape,RuntimeCheckShape.EMPTY_ARRAY,true,true)
+            val requirements=RunRuntimeRequirements(shape,RuntimeCheckShape.EMPTY_ARRAY,true,true,RuntimeSwitch.DISABLED,RuntimeSwitch.DISABLED,RuntimeSwitch.ENABLED)
             val text=PreparationExport.encode(UploadFixture.config,1,1,null,requirements=requirements)
             val report=Json.parseToJsonElement(text).jsonObject.getValue("execution_requirements").jsonObject
             assertEquals(shape==RuntimeCheckShape.EMPTY_STRING,report.getValue("supported").jsonPrimitive.boolean)
@@ -112,7 +112,7 @@ class RunSensorsTest {
         }
     }
     @Test fun `unknown null nonempty and opaque runtime check configuration is not silently skipped`() {
-        val base=Json.parseToJsonElement("""{"run_check":[],"android_cheats":[],"gyroscope_type":1,"is_check_geetest":0,"is_check_shumeng":0,"is_check_deepkonw":0,"robot_module":false}""").jsonObject
+        val base=Json.parseToJsonElement("""{"run_check":[],"android_cheats":[],"gyroscope_type":1,"is_check_geetest":0,"is_check_shumeng":0,"is_check_deepkonw":0,"robot_module":false,"is_check_device":0,"is_check_geedevice":0,"is_check_time":1}""").jsonObject
         assertTrue(RunRuntimeRequirements.inspect(base).supported)
         assertFalse(RunRuntimeRequirements.inspect(JsonObject(base+mapOf("robot_module" to JsonPrimitive("false")))).supported)
         for(value in listOf(JsonNull,JsonPrimitive(""),JsonPrimitive("unrecognized"),JsonArray(listOf(JsonPrimitive(1))))) {

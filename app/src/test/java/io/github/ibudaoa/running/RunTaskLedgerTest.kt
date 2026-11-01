@@ -165,6 +165,31 @@ class RunTaskLedgerTest {
         assertFalse(task.summary.recordVerified)
     }
 
+    @Test fun `old journal without new summaries remains queryable and new local summaries do not alter verdict`() {
+        val journal=Journal();val task=running(journal);task.accept(task.begin(RunWrite.FINISH),finish)
+        val old=RunTaskLedger.restore(journal,123)!!;old.foreground()
+        assertTrue(old.completionChecks().isEmpty());assertEquals(0,old.acknowledgedPoints());assertNull(old.materialProblem())
+        old.recordCompletionChecks(setOf(RunCompletionProblem.PACE,RunCompletionProblem.CHECKPOINT_REPORTS),1)
+        val restored=RunTaskLedger.restore(journal,123)!!;restored.foreground()
+        assertEquals(2,restored.completionChecks().size);assertEquals(1,restored.acknowledgedPoints())
+        assertEquals(RunTaskPhase.AWAITING_VERDICT,restored.summary.phase)
+        assertTrue(restored.verifyRecord(detail).platformValid)
+    }
+    @Test fun `unknown checkpoint version is preserved byte for byte without migration or deletion`() {
+        val journal=Journal();running(journal)
+        journal.bytes=journal.bytes!!.toString(Charsets.UTF_8).replace("\"schema\":1","\"schema\":2").toByteArray()
+        val before=journal.bytes!!.clone();val saves=journal.saves
+        assertTrue(runCatching { RunTaskLedger.restore(journal,123) }.isFailure)
+        assertArrayEquals(before,journal.bytes);assertEquals(saves,journal.saves)
+    }
+    @Test fun `material failure survives restart without creating a platform invalid verdict`() {
+        val journal=Journal();val task=running(journal)
+        task.recordMaterialFailure(RunMaterialProblem.TIME);task.background()
+        val restored=RunTaskLedger.restore(journal,123)!!
+        assertEquals(RunMaterialProblem.TIME,restored.materialProblem())
+        assertEquals(RunTaskPhase.INTERRUPTED,restored.summary.phase)
+        assertFalse(restored.summary.recordVerified);assertFalse(restored.summary.recordBound)
+    }
     @Test fun `invalid record retains safe platform reason across restart without exposing it in summary`() {
         val journal=Journal();val task=running(journal);task.accept(task.begin(RunWrite.FINISH),finish)
         val rejected=detail.toString(Charsets.UTF_8).replace("\"record_status\":1","\"record_status\":2,\"record_failed_reason\":\"打卡次数不足\"")

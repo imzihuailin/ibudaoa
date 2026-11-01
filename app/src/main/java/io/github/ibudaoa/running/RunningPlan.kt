@@ -30,8 +30,16 @@ enum class RunningPlanProblem(val label:String) {
 data class RunningPlanSummary(val phase:RunningPlanPhase=RunningPlanPhase.IDLE,val problem:RunningPlanProblem?=null,
     val distanceMeters:Int?=null,val paceSecondsPerKm:Int?=null,val durationSeconds:Int?=null,val pointCount:Int?=null,
     val accessDistanceMeters:Int?=null,val failureStage:String?=null)
-internal class RunningPlan(val route:FixedPointRoute,val targetPaceSecondsPerKm:Int,val durationSeconds:Int)
+internal class RunningPlan(val route:FixedPointRoute,val targetPaceSecondsPerKm:Int,val durationSeconds:Int,
+    val rule:CampusTimeRule,val plannedDate:java.time.LocalDate)
 object RunningPlanRules {
+    internal fun recheck(config:DiagnosticConfig,plan:RunningPlan,now:Instant,zone:ZoneId):RunningPlanProblem? {
+        val (fresh,summary)=create(config,plan.route,now,zone)
+        if(fresh==null)return summary.problem ?: RunningPlanProblem.SCHOOL_RULES
+        if(fresh.rule!=plan.rule || fresh.plannedDate!=plan.plannedDate || fresh.targetPaceSecondsPerKm!=plan.targetPaceSecondsPerKm)
+            return RunningPlanProblem.SCHOOL_RULES
+        return null
+    }
     fun problem(config:DiagnosticConfig,now:Instant,zone:ZoneId):RunningPlanProblem? {
         val calendar=CalendarReviewer.review(config,now,zone)
         if(config.stageVerification !in setOf(io.github.ibudaoa.diagnostics.StageVerification.SKIPPED_EMPTY,io.github.ibudaoa.diagnostics.StageVerification.DISABLED)) return RunningPlanProblem.FACE
@@ -64,7 +72,7 @@ object RunningPlanRules {
         val duration=ceil(route.upperDistanceMeters*pace/1000).toInt().coerceIn(earliest,latest)
         val broadEnd=(config.config["run_end_time"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() ?: return blocked(RunningPlanProblem.TIME)
         if(duration+15>minOf(rule.endSecond,broadEnd)-second) return blocked(RunningPlanProblem.TIME_REMAINING)
-        val plan=RunningPlan(route,pace,duration)
+        val plan=RunningPlan(route,pace,duration,rule,now.atZone(zone).toLocalDate())
         return plan to RunningPlanSummary(RunningPlanPhase.PLANNED,null,ceil(route.upperDistanceMeters).toInt(),pace,duration,route.selectedIds.size,
             ceil(route.originAccessMeters).toInt())
     }

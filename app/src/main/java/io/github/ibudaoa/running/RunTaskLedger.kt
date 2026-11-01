@@ -139,6 +139,19 @@ internal class RunTaskLedger private constructor(private val journal:RunTaskJour
         check(!closed && !storageFailed && text("pending")==RunWrite.FINISH.name)
         save(mapOf("finish_stage" to JsonPrimitive(stage.name)))
     }
+    @Synchronized fun recordCompletionChecks(problems:Set<RunCompletionProblem>,acknowledged:Int) {
+        check(!closed && foreground && !storageFailed && acknowledged in 0..24)
+        save(mapOf("completion_checks" to JsonArray(problems.sortedBy { it.name }.map { JsonPrimitive(it.name) }),
+            "acknowledged_points" to JsonPrimitive(acknowledged)))
+    }
+    @Synchronized fun completionChecks():Set<RunCompletionProblem> = (checkpoint["completion_checks"] as? JsonArray)
+        ?.mapNotNull { value -> RunCompletionProblem.entries.firstOrNull { it.name==(value as? JsonPrimitive)?.content } }?.toSet().orEmpty()
+    @Synchronized fun acknowledgedPoints():Int = number("acknowledged_points")?.takeIf { it in 0..24 }?.toInt() ?: 0
+    @Synchronized fun recordMaterialFailure(problem:RunMaterialProblem) {
+        check(!closed && foreground && !storageFailed)
+        save(mapOf("material_problem" to JsonPrimitive(problem.name)))
+    }
+    @Synchronized fun materialProblem():RunMaterialProblem? = RunMaterialProblem.entries.firstOrNull { it.name==text("material_problem") }
     @Synchronized fun finishStage():RunFinishStage? = text("finish_stage")?.let { RunFinishStage.valueOf(it) }
     @Synchronized fun canArchiveAfterManualNoRecord():Boolean = !closed && !storageFailed && foreground &&
         summary.phase==RunTaskPhase.WRITE_UNCERTAIN && text("pending")==RunWrite.FINISH.name && number("start")!=null && number("record")==null

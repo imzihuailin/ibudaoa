@@ -70,8 +70,12 @@ internal class LocationHealthTracker(fine: Boolean, enabled: Boolean?) {
             value=value.copy(status=LocationCheckStatus.NO_CALLBACK)
     }
     fun expired() {
-        if (value.status == LocationCheckStatus.ACCEPTED) value=value.copy(status=LocationCheckStatus.EXPIRED,lastRejection=FixRejection.EXPIRED)
+        if (value.status in setOf(LocationCheckStatus.ACCEPTED,LocationCheckStatus.STARTING))
+            value=value.copy(status=LocationCheckStatus.EXPIRED,lastRejection=FixRejection.EXPIRED)
     }
-    fun restarted() { value=value.copy(status=LocationCheckStatus.STARTING, retries=increment(value.retries)) }
+    fun restarted(retainFailure:Boolean=false) {
+        val preserve=retainFailure && value.status in setOf(LocationCheckStatus.SDK_ERROR,LocationCheckStatus.REJECTED,LocationCheckStatus.INITIALIZATION_FAILED)
+        value=value.copy(status=if(preserve)value.status else LocationCheckStatus.STARTING,retries=increment(value.retries))
+    }
     fun initializationFailed() { value=value.copy(status=LocationCheckStatus.INITIALIZATION_FAILED) }
 }

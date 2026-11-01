@@ -133,12 +133,12 @@ private fun ScreenPreview(scene: PreviewScene) {
         Scaffold(bottomBar = { AppNavigation(destination) {} }) { padding ->
             Box(Modifier.fillMaxSize().padding(padding)) {
                 when (destination) {
-                    Destination.SETTINGS -> SettingsPage(state, {}, {}, {}, {}, {}, {}, {})
+                    Destination.SETTINGS -> SettingsPage(state, {}, {}, {}, {}, {}, {})
                     else -> MapPage(
                         state = state, runningPage = destination == Destination.RUN,
                         onWarmup = {}, onImport = {}, onExport = {}, onExportConnectionReport = {},
                         onSummary = {}, onClear = {}, onCheckRoadGaps = {}, onReviewRoadGaps = {},
-                        onReviewRoadDirections = {}, onDisplayFix = {}, onLocationDiagnostics = {},
+                        onReviewRoadDirections = {},
                         onPrepareLocalPreview = {}, onPrepareRunningPlan = {}, onAutomaticAction = {},
                         onFinishAutomatic = {}, onArchiveAutomatic = {}, mapActive = false,
                         mapBackground = { MapPlaceholder() },

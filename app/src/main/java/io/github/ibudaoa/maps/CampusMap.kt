@@ -20,7 +20,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,19 +55,16 @@ import kotlinx.coroutines.delay
 @Composable
 fun CampusMap(config: DiagnosticConfig?, consent: Boolean, active: Boolean, roadEvidence: RoadEvidenceSnapshot?, routeDraft: FixedPointRoute?, modifier: Modifier = Modifier, reviewGap: RoadGap? = null, reviewRoad: ObservedRoadEdge? = null, originProposal: OriginRoadProposal? = null,
     selectedIds: List<String> = emptyList(), automaticDisplay:Boolean=false,
-    automaticPosition:io.github.ibudaoa.domain.CampusCoordinate?=null, onFix: (DisplayFix?) -> Unit = {},
-    onLocationDiagnostics: (LocationDiagnostics) -> Unit = {}) {
+    automaticPosition:io.github.ibudaoa.domain.CampusCoordinate?=null) {
     if (!BuildConfig.MAP_KEY_CONFIGURED || !consent || config == null) return
-    val latestOnFix by rememberUpdatedState(onFix)
-    val latestDiagnostics by rememberUpdatedState(onLocationDiagnostics)
+    val location=LocalForegroundLocation.current
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var attempt by remember { mutableIntStateOf(0) }
     var loaded by remember(config, attempt) { mutableStateOf(false) }
     var loadSlow by remember(config, attempt) { mutableStateOf(false) }
-    var locationStatus by remember { mutableStateOf("等待前台定位") }
-    var locationCheck by remember { mutableStateOf<LocationDiagnostics?>(null) }
-    var permissionRevision by remember { mutableIntStateOf(0) }
+    val locationStatus=location.message
+    val locationCheck=location.diagnostics
     val permission = LocalLocationPermission.current
     val host = remember(context, config, attempt) {
         if (Build.SUPPORTED_ABIS.none { it == "arm64-v8a" || it == "armeabi-v7a" }) null
@@ -99,26 +95,8 @@ fun CampusMap(config: DiagnosticConfig?, consent: Boolean, active: Boolean, road
         if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) host.resume()
         onDispose { lifecycle.removeObserver(observer); host.destroy() }
     }
-    DisposableEffect(host, lifecycle, active, automaticDisplay, permissionRevision, permission.revision) {
-        if (host == null) return@DisposableEffect onDispose { }
-        val locator = ForegroundAmapLocation(context)
-        fun stop() { locator.stop(); host.showFix(null); latestOnFix(null) }
-        fun start() {
-            stop()
-            if (!active || automaticDisplay) return
-            locator.start(onFix={ fix,status -> host.showFix(fix);locationStatus=status;latestOnFix(fix) },
-                onDiagnostics={ snapshot -> locationCheck=snapshot;latestDiagnostics(snapshot) })
-        }
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_RESUME -> start()
-                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP, Lifecycle.Event.ON_DESTROY -> stop()
-                else -> Unit
-            }
-        }
-        lifecycle.addObserver(observer)
-        if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) start()
-        onDispose { lifecycle.removeObserver(observer); stop() }
+    LaunchedEffect(host,location.fix,active,automaticDisplay) {
+        host?.showFix(location.fix.takeIf { active && !automaticDisplay })
     }
     Box(modifier.fillMaxSize()) {
         if (host != null) AndroidView(factory = { host.view }, update = { host.showRoadEvidence(roadEvidence); host.showRouteDraft(routeDraft); host.showReviewGap(reviewGap); host.showReviewRoad(reviewRoad); host.showOriginProposal(originProposal); host.showSelected(selectedIds); host.showAutomatic(automaticPosition) }, modifier = Modifier.fillMaxSize())
@@ -141,7 +119,7 @@ fun CampusMap(config: DiagnosticConfig?, consent: Boolean, active: Boolean, road
                         permission.request()
                     }) { Text("允许前台定位") }
                 } else if (locationCheck?.status != LocationCheckStatus.ACCEPTED) {
-                    TextButton(onClick={ permissionRevision++ }) { Text("重新获取位置") }
+                    TextButton(onClick=location.retry) { Text("立即重试定位") }
                 }
             }
             if (host == null || loadSlow && !loaded) TextButton(onClick = { attempt++ }) { Text("重试地图") }

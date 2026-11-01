@@ -471,10 +471,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val grant=runGrant ?: return showMessage("请重新核对运行计划。")
         val config=snapshot.config ?: return
         if(!AccountSessionRuntime.session.isCurrent(grant,Instant.now().epochSecond))return blockRunningPlan(RunningPlanProblem.ONLINE_EXPIRED)
-        if(!grant.executionRequirements.automaticSupported)return showMessage("当前账号的运动校验配置尚未适配，请导出诊断；不需要实际走跑。")
+        grant.executionRequirements.blockingProblem?.let { return showMessage(it.label) }
         val selected=snapshot.previewPoints ?: return
         if(selected.selectedIds.any { it.toLongOrNull()?.let { value -> value>0 }!=true })return showMessage("当前点位编号格式尚未适配，尚未启动任务。")
         if(selected.selectedIds!=plan.route.selectedIds || selected.locked)return showMessage("本次固定点位状态已变化，请重新核对。")
+        val reviewed=snapshot.localPreview ?: return blockRunningPlan(RunningPlanProblem.ORIGIN)
+        val graph=snapshot.roadGraph ?: return blockRunningPlan(RunningPlanProblem.ROADS)
+        fun startProblem():RunningPlanProblem? {
+            val current=state.value
+            val now=Instant.now()
+            if(!accountForeground || !lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) ||
+                !AccountSessionRuntime.session.isCurrent(grant,now.epochSecond))return RunningPlanProblem.ONLINE_EXPIRED
+            if(!hasPreciseLocation())return RunningPlanProblem.LOCATION
+            val currentGraph=current.roadGraph ?: return RunningPlanProblem.ROADS
+            if(current.config!=config || currentGraph.scope!=graph.scope || current.localPreview!==reviewed ||
+                current.previewPoints?.selectedIds!=selected.selectedIds || config!=RunningRoadSnapshot.canonical(grant.config))
+                return RunningPlanProblem.CONFIGURATION_CHANGED
+            RunningPlanRules.recheck(config,plan,now,ZoneId.of("Asia/Shanghai"))?.let { return it }
+            return when(LocalRoutePreviewEngine.reviewProblem(config,current.capturedConfig,currentGraph,reviewed,current.displayFix,
+                now,SystemClock.elapsedRealtime(),ZoneId.of("Asia/Shanghai"),AmapDistance())) {
+                null -> null
+                PreviewProblem.LOCATION_REQUIRED -> RunningPlanProblem.LOCATION
+                PreviewProblem.POSITION_CHANGED -> RunningPlanProblem.ORIGIN
+                else -> RunningPlanProblem.CONFIGURATION_CHANGED
+            }
+        }
+        startProblem()?.let { return blockRunningPlan(it) }
         mutableState.update { it.copy(busy=true,automaticRun=AutomaticRunSummary(AutomaticRunPhase.STARTING)) }
         automaticJob=viewModelScope.launch {
             var created:RunTaskLedger?=null
@@ -493,7 +515,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val gateway=io.github.ibudaoa.capture.AutomaticRunGateway(AccountSessionRuntime.session,config,grant.executionRequirements)
                 val controller=AutomaticRunController(ledger,timeline,gateway,grant.executionRequirements.gyroscopeRequired==true,
                     { accountForeground && AccountSessionRuntime.session.runAccountId()==account },
-                    { AccountSessionRuntime.session.isCurrent(grant,Instant.now().epochSecond) },{ SystemClock.elapsedRealtime() })
+                    { startProblem()==null },{ SystemClock.elapsedRealtime() })
                 automaticController=controller
                 mutableState.update { it.copy(automaticRoute=plan.route) };publishAutomatic()
                 if(!controller.start()) { publishAutomatic();return@launch }
@@ -602,7 +624,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val account=AccountSessionRuntime.session.runAccountId() ?: error("Account unavailable")
                 val ledger=withContext(Dispatchers.IO) { RunTaskLedger.restore(automaticJournal,account) } ?: error("No pending task")
                 ledger.foreground()
-                mutableState.update { it.copy(automaticRun=it.automaticRun.copy(platformStarted=ledger.summary.platformStarted,recordBound=ledger.summary.recordBound,pendingWrite=ledger.pendingWrite()?.name,finishStage=ledger.finishStage(),identityChecks=ledger.identityChecks(),problem=ledger.lastVerdict()?.let { "RECORD_$it" })) }
+                mutableState.update { it.copy(automaticRun=it.automaticRun.copy(platformStarted=ledger.summary.platformStarted,recordBound=ledger.summary.recordBound,pendingWrite=ledger.pendingWrite()?.name,finishStage=ledger.finishStage(),identityChecks=ledger.identityChecks(),
+                    ruleProblems=ledger.completionChecks(),acknowledgedPoints=ledger.acknowledgedPoints(),
+                    problem=ledger.materialProblem()?.let { "MATERIAL_${it.name}" } ?: ledger.lastVerdict()?.let { "RECORD_$it" })) }
                 if(!ledger.summary.recordBound) { showMessage("上次自动任务结果尚未确认，暂不能重开或恢复推进。请导出诊断。");return@launch }
                 val context=ledger.requestContext()
                 val gateway=io.github.ibudaoa.capture.RunRecordReader(AccountSessionRuntime.session)

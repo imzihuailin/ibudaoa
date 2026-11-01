@@ -5,6 +5,7 @@ import io.github.ibudaoa.diagnostics.PreparationExport
 import io.github.ibudaoa.domain.*
 import io.github.ibudaoa.roads.*
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
 import kotlinx.serialization.json.*
 import java.util.Base64
 import javax.crypto.Cipher
@@ -32,24 +33,28 @@ class AutomaticRunTest {
         override fun clear() { bytes=null }
         override fun archiveResolved(bytes:ByteArray) {}
     }
-    private inner class Harness {
+    private fun requirements()=RunRuntimeRequirements(RuntimeCheckShape.EMPTY_ARRAY,RuntimeCheckShape.EMPTY_ARRAY,true,true,
+        RuntimeSwitch.DISABLED,RuntimeSwitch.DISABLED,RuntimeSwitch.DISABLED)
+    private inner class Harness(requirements:RunRuntimeRequirements=requirements()) {
         var clock=1000L;var bound=true;var prepared=true;var fail:RunEndpoint?=null
         var during:(RunEndpoint)->Unit={}
         val requests=mutableListOf<RunEndpoint>();val fields=mutableListOf<Pair<RunEndpoint,Map<String,String>>>()
         var uploads=0
+        var failUploadAt:Int?=null
         var credentialOnly=false
+        var serverStart=1700000000L
         val journal=Journal()
         val ledger=RunTaskLedger.create(journal,42,1,2,3,listOf("21","22"),generated=true,gyroRequired=true)
         val run=timeline()
         val gateway=AutomaticRunGateway(RunProtocolFixture.session(),config,
-            RunRuntimeRequirements(RuntimeCheckShape.EMPTY_ARRAY,RuntimeCheckShape.EMPTY_ARRAY,true,true),
+            requirements,
             now={UploadFixture.now},connection={object:AccountReadConnection {
                 override fun send(request:LocalRequest):ByteArray {
                     val ep=RunEndpoint.entries.single { it.path==request.target };requests.add(ep)
                     fields.add(ep to RunProtocolFixture.fields(request));during(ep)
                     if(ep==fail)error("Synthetic network uncertainty")
                     return when(ep) {
-                        RunEndpoint.REGISTER -> """{"status":1,"data":{"timestamp":1700000000,"str":"${"a".repeat(32)}","location_septal":20}}""".toByteArray()
+                        RunEndpoint.REGISTER -> """{"status":1,"data":{"timestamp":$serverStart,"str":"${"a".repeat(32)}","location_septal":20}}""".toByteArray()
                         RunEndpoint.STORAGE -> if(credentialOnly) {
                             val envelope=Json.parseToJsonElement(UploadFixture.grant().toString(Charsets.UTF_8)).jsonObject
                             JsonObject(envelope+mapOf("data" to JsonObject(envelope.getValue("data").jsonObject-setOf("bucket","endpoint")))).toString().toByteArray()
@@ -60,7 +65,7 @@ class AutomaticRunTest {
                     }
                 }
                 override fun close() {}
-            }},uploader={RunObjectUpload { uploads++;FakeRunHttps(it,etag=true) }})
+            }},uploader={RunObjectUpload { uploads++;if(uploads==failUploadAt)error("Synthetic upload failure");FakeRunHttps(it,etag=true) }})
         val controller=AutomaticRunController(ledger,run,gateway,true,{bound},{prepared},{clock})
         suspend fun complete() {
             assertTrue(controller.start())
@@ -199,7 +204,7 @@ class AutomaticRunTest {
         assertFalse(h.run.current()!!.toString().contains("CampusCoordinate"))
     }
     @Test fun `motion file is generated virtual kinematics and both files match the same automatic trace`() {
-        val run=timeline();run.start(1000);run.advance(41000);run.freeze(41000)
+        val run=timeline();run.start(1000);run.advance(41000);run.freeze(41000,UploadFixture.context)
         val context=RunRequestContext(42,1,2,3,listOf("21","22"),1700000000,"a".repeat(32))
         AutomaticRunFiles.build(context,config,run,UploadFixture.key).use { files ->
             val cipher=Cipher.getInstance("AES/CBC/PKCS5Padding")
@@ -207,6 +212,11 @@ class AutomaticRunTest {
             val track=Json.parseToJsonElement(cipher.doFinal(Base64.getMimeDecoder().decode(files.track)).toString(Charsets.UTF_8)).jsonArray
             val motion=Json.parseToJsonElement(files.motion.toString(Charsets.UTF_8)).jsonArray
             assertEquals(run.trace().size,track.size);assertEquals(track.size,motion.size)
+            val format=java.text.DecimalFormat("0.000000",java.text.DecimalFormatSymbols(java.util.Locale.ROOT))
+            track.zip(motion).forEach { (row,vector) ->
+                assertEquals(format.format(row.jsonObject.getValue("o").jsonPrimitive.double),vector.jsonObject.getValue("n").jsonPrimitive.content)
+                assertEquals(format.format(row.jsonObject.getValue("a").jsonPrimitive.double),vector.jsonObject.getValue("a").jsonPrimitive.content)
+            }
             assertEquals(1700000040000L,motion.last().jsonObject.getValue("t").jsonPrimitive.long)
             assertEquals(run.trace().first().coordinate.latitude.toFloat().toDouble(),track.first().jsonObject.getValue("a").jsonPrimitive.double,0.0)
             assertEquals("250",files.fields["step_num"])
@@ -240,7 +250,7 @@ class AutomaticRunTest {
     @Test fun `supported no fence client does not invalidate the current position approach outside the drawn boundary`() {
         val smaller=config.copy(config=JsonObject(config.config+mapOf("run_zone_latlng" to JsonArray(listOf(
             "113.99,29.9995","114.01,29.9995","114.01,30.0015","113.99,30.0015").map(::JsonPrimitive)))))
-        val run=timeline();run.start(1000);run.advance(41000);run.freeze(41000)
+        val run=timeline();run.start(1000);run.advance(41000);run.freeze(41000,UploadFixture.context)
         val context=RunRequestContext(42,1,2,3,listOf("21","22"),1700000000,"a".repeat(32))
         AutomaticRunFiles.build(context,smaller,run,UploadFixture.key).use {
             assertEquals("1",it.fields["is_running_area_valid"])
@@ -249,6 +259,149 @@ class AutomaticRunTest {
         }
     }
 
+    @Test fun `unsupported or unknown device policy makes zero task requests`()=runBlocking {
+        for(policy in listOf(requirements().copy(deviceCheck=RuntimeSwitch.ENABLED),requirements().copy(geeDeviceCheck=RuntimeSwitch.MISSING),
+            requirements().copy(timeCheck=RuntimeSwitch.INVALID),requirements().copy(runChecks=RuntimeCheckShape.NONEMPTY_ARRAY))) {
+            val h=Harness(policy)
+            assertFalse(h.controller.start());assertTrue(h.requests.isEmpty());assertEquals(0,h.uploads)
+            assertTrue(h.ledger.canAbandonUnsent())
+        }
+    }
+    @Test fun `preparation changes after zone response preserves task without registering`()=runBlocking {
+        val h=Harness();h.during={ if(it==RunEndpoint.ZONE)h.prepared=false }
+        assertFalse(h.controller.start());assertEquals(listOf(RunEndpoint.ZONE),h.requests)
+        assertEquals("PREPARATION_CHANGED",h.controller.summary.problem)
+        assertFalse(h.ledger.canAbandonUnsent());assertFalse(h.controller.start())
+    }
+    @Test fun `enabled server time check honors official ten minute boundary and preserves rejected registration`()=runBlocking {
+        for(offset in listOf(-600L,0L,600L)) {
+            val h=Harness(requirements().copy(timeCheck=RuntimeSwitch.ENABLED));h.serverStart=UploadFixture.now.epochSecond+offset
+            assertTrue(h.controller.start())
+        }
+        for(offset in listOf(-601L,601L)) {
+            val h=Harness(requirements().copy(timeCheck=RuntimeSwitch.ENABLED));h.serverStart=UploadFixture.now.epochSecond+offset
+            assertFalse(h.controller.start());assertTrue(h.controller.summary.platformStarted)
+            assertEquals("REGISTRATION_TIME_MISMATCH",h.controller.summary.problem)
+            assertTrue(h.run.trace().isEmpty());assertEquals(0,h.uploads)
+            assertFalse(h.controller.start());assertEquals(1,h.requests.count { it==RunEndpoint.REGISTER })
+        }
+    }
+    @Test fun `finish snapshot excludes delayed tick and storage request time and is frozen only once`()=runBlocking {
+        val h=Harness();assertTrue(h.controller.start());h.clock+=45_000
+        h.during={ if(it==RunEndpoint.STORAGE) { h.clock+=30_000;h.run.freeze(h.clock,UploadFixture.context) } }
+        h.controller.tick()
+        val fields=h.fields.single { it.first==RunEndpoint.FINISH }.second
+        assertEquals("40",fields["used_time"]);assertEquals("1700000040",fields["end_time"])
+        assertEquals(40_000L,h.run.completion().samples.last().elapsedMillis)
+        assertEquals(40L,h.controller.summary.elapsedSeconds)
+    }
+    @Test fun `pause boundaries keep stationary minutes empty and file timestamps agree with total duration`() {
+        val run=timeline();run.start(1000);run.advance(11000);run.pause(11000)
+        run.advance(131000);run.resume(131000);run.advance(161000);run.freeze(191000,UploadFixture.context)
+        val snapshot=run.completion();snapshot.validate(UploadFixture.context)
+        assertEquals(160_000L,snapshot.elapsedMillis)
+        assertEquals(0,snapshot.minuteSteps()[1])
+        val anchor=snapshot.samples.single { it.elapsedMillis==130_000L }
+        assertEquals(0.0,anchor.speed,0.0);assertEquals(50.0,anchor.meters,0.001)
+        assertEquals(250,snapshot.minuteSteps().sum())
+        AutomaticRunFiles.build(UploadFixture.context,config,snapshot,UploadFixture.key).use { files ->
+            val motion=Json.parseToJsonElement(files.motion.toString(Charsets.UTF_8)).jsonArray
+            assertEquals(1700000160000L,motion.last().jsonObject.getValue("t").jsonPrimitive.long)
+            assertEquals("160",files.fields["used_time"])
+        }
+    }
+    @Test fun `ending during a pause keeps its time without inventing paused distance or steps`() {
+        val run=timeline();run.start(1000);run.advance(11000);run.pause(11000);run.freeze(131000,UploadFixture.context)
+        val s=run.completion();s.validate(UploadFixture.context)
+        assertEquals(130_000L,s.elapsedMillis);assertEquals(10_000L,s.activeMillis)
+        assertEquals(50.0,s.meters,0.001);assertEquals(62,s.minuteSteps().sum())
+        run.freeze(231000,UploadFixture.context);assertSame(s,run.completion())
+        assertTrue(runCatching { run.resume(231000) }.isFailure)
+    }
+    @Test fun `malformed or mixed completion is rejected before authorization or file upload`()=runBlocking {
+        val h=Harness();h.run.start(1000);h.run.advance(41000);h.run.freeze(41000,UploadFixture.context)
+        val s=h.run.completion()
+        val corrupt=listOf(
+            AutomaticRunSnapshot(s.samples.reversed(),s.visits,s.ids,s.elapsedMillis,s.activeMillis,UploadFixture.context),
+            AutomaticRunSnapshot(s.samples,s.visits+listOf(s.visits.first()),s.ids,s.elapsedMillis,s.activeMillis,UploadFixture.context),
+            AutomaticRunSnapshot(s.samples,s.visits,s.ids,s.elapsedMillis+1000,s.activeMillis,UploadFixture.context))
+        corrupt.forEach { assertTrue(runCatching { it.validate(UploadFixture.context) }.exceptionOrNull() is RunMaterialException) }
+        val wrong=RunRequestContext(42,1,2,3,listOf("21","99"),1700000000,"a".repeat(32))
+        assertTrue(runCatching { h.gateway.write(RunWrite.FINISH,wrong,h.run) }.exceptionOrNull() is RunMaterialException)
+        assertTrue(h.requests.isEmpty());assertEquals(0,h.uploads)
+    }
+    @Test fun `historical missed points are not flushed at finish as current positions`()=runBlocking {
+        val h=Harness();assertTrue(h.controller.start());h.clock+=40_000;h.controller.tick()
+        val positions=h.fields.filter { it.first==RunEndpoint.LOCATION }
+        assertEquals(1,positions.size)
+        assertEquals(p(100.0).latitude,positions.single().second.getValue("latitude").toDouble(),0.000000001)
+        assertEquals(1,h.controller.summary.acknowledgedPoints)
+        assertTrue(RunCompletionProblem.CHECKPOINT_REPORTS in h.controller.summary.ruleProblems)
+        assertEquals(1,h.ledger.acknowledgedPoints())
+    }
+    @Test fun `frozen material cannot be mutated or rebound to a different account registration or point order`() {
+        val run=timeline();run.start(1000);run.advance(41000);run.freeze(41000,UploadFixture.context)
+        val s=run.completion()
+        assertTrue(runCatching { (s.samples as MutableList).clear() }.isFailure)
+        assertTrue(runCatching { (s.ids as MutableSet).clear() }.isFailure)
+        for(context in listOf(RunRequestContext(43,1,2,3,listOf("21","22"),1700000000,"a".repeat(32)),
+            RunRequestContext(42,1,2,3,listOf("21","22"),1700000001,"a".repeat(32)),
+            RunRequestContext(42,1,2,3,listOf("22","21"),1700000000,"a".repeat(32)))) {
+            assertTrue(runCatching { s.validate(context) }.exceptionOrNull() is RunMaterialException)
+        }
+        assertEquals("AutomaticRunSnapshot(generated)",s.toString())
+    }
+    @Test fun `completion checks honor inclusive closing time and expose pause induced pace failure`() {
+        val rule=buildJsonObject {
+            put("start_time",21600);put("end_time",79200);put("min_distance",0.1);put("max_distance",1)
+            put("max_pace",180);put("min_pace",540);put("min_log_num",2);put("point_num_online",2);put("point_num_offline",0)
+        }
+        val cfg=config.copy(config=JsonObject(config.config+("time_rule_arr" to JsonArray(listOf(rule)))))
+        val run=timeline();run.start(1000);run.advance(41000);run.freeze(41000,UploadFixture.context)
+        val close=java.time.Instant.parse("2026-10-29T13:59:20Z").epochSecond
+        assertTrue(run.completion().ruleProblems(cfg,close).isEmpty())
+        assertTrue(RunCompletionProblem.TIME in run.completion().ruleProblems(cfg,close+1))
+        val paused=timeline();paused.start(1000);paused.advance(11000);paused.pause(11000)
+        paused.resume(131000);paused.advance(161000);paused.freeze(161000,UploadFixture.context)
+        assertTrue(RunCompletionProblem.PACE in paused.completion().ruleProblems(cfg,UploadFixture.now.epochSecond))
+        assertFalse(RunCompletionProblem.DISTANCE in paused.completion().ruleProblems(cfg,UploadFixture.now.epochSecond))
+    }
+    @Test fun `subsecond finish records a local time failure without uploading or declaring platform invalid`()=runBlocking {
+        val h=Harness();assertTrue(h.controller.start());h.clock+=100
+        assertFalse(h.controller.finish());assertEquals("MATERIAL_TIME",h.controller.summary.problem)
+        assertEquals(0,h.uploads);assertFalse(h.controller.summary.recordVerified)
+        assertEquals(RunMaterialProblem.TIME,h.ledger.materialProblem())
+    }
+    @Test fun `failed location response cannot acknowledge points or trigger catch up writes`()=runBlocking {
+        val h=Harness();assertTrue(h.controller.start());h.fail=RunEndpoint.LOCATION;h.clock+=20_000;h.controller.tick()
+        assertEquals(0,h.controller.summary.acknowledgedPoints)
+        repeat(3) { h.clock+=20_000;h.controller.tick() }
+        assertEquals(1,h.requests.count { it==RunEndpoint.LOCATION });assertEquals(0,h.uploads)
+    }
+    @Test fun `partial upload failure fences finish and does not reupload or associate`()=runBlocking {
+        val h=Harness();assertTrue(h.controller.start());h.failUploadAt=2;h.clock+=40_000;h.controller.tick()
+        repeat(3) { h.controller.tick();assertFalse(h.controller.finish()) }
+        assertEquals(2,h.uploads);assertEquals(0,h.requests.count { it==RunEndpoint.FINISH || it==RunEndpoint.GYROSCOPE })
+        assertTrue(h.ledger.summary.needsReconciliation)
+    }
+    @Test fun `late finish response after background binds receipt but does not associate or query`()=runBlocking {
+        val h=Harness();assertTrue(h.controller.start())
+        h.during={ if(it==RunEndpoint.FINISH)h.controller.interrupt() };h.clock+=40_000;h.controller.tick()
+        assertTrue(h.controller.summary.recordBound);assertFalse(h.controller.summary.recordVerified)
+        assertEquals(0,h.requests.count { it==RunEndpoint.GYROSCOPE || it==RunEndpoint.RECORD })
+    }
+    @Test fun `concurrent start tick and finish cannot queue duplicate operations behind registration`()=runBlocking {
+        val h=Harness()
+        val entered=java.util.concurrent.CountDownLatch(1);val release=java.util.concurrent.CountDownLatch(1)
+        h.during={ if(it==RunEndpoint.REGISTER) { entered.countDown();check(release.await(5,java.util.concurrent.TimeUnit.SECONDS)) } }
+        val first=kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default).async { h.controller.start() }
+        try {
+            assertTrue(entered.await(5,java.util.concurrent.TimeUnit.SECONDS))
+            assertFalse(h.controller.start());h.controller.tick();assertFalse(h.controller.finish())
+        } finally { release.countDown() }
+        assertTrue(first.await());assertEquals(1,h.requests.count { it==RunEndpoint.REGISTER })
+        assertEquals(0,h.uploads)
+    }
     @Test fun `whole second protocol duration cannot round a short automatic run faster than its target pace`() {
         val short=route().copy(legs=listOf(ObservedRoadEdge("origin","21",listOf(p(-10.0),p(0.0)),10.0),
             ObservedRoadEdge("21","22",listOf(p(0.0),p(0.1)),0.1)),minimumTargetMeters=5.0)

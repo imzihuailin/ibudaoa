@@ -7,6 +7,24 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LocationDiagnosticsTest {
+    @Test fun `automatic restart retains concrete failure reasons until a valid update`() {
+        val health=LocationHealthTracker(true,true)
+        health.sdkError(4);health.restarted(retainFailure=true);health.expired()
+        assertEquals(LocationCheckStatus.SDK_ERROR,health.value.status)
+        assertEquals(4,health.value.lastSdkCode);assertEquals(1,health.value.retries)
+        health.sample(LocationCoordinateFrame.GCJ02,60f,FixRejection.ACCURACY)
+        health.restarted(retainFailure=true)
+        assertEquals(LocationCheckStatus.REJECTED,health.value.status)
+        assertEquals(FixRejection.ACCURACY,health.value.lastRejection)
+        health.sample(LocationCoordinateFrame.GCJ02,8f,null)
+        assertEquals(LocationCheckStatus.ACCEPTED,health.value.status);assertNull(health.value.lastRejection)
+    }
+    @Test fun `a retained position can expire during an automatic restart without erasing later SDK errors`() {
+        val health=LocationHealthTracker(true,true)
+        health.sample(LocationCoordinateFrame.GCJ02,8f,null);health.restarted(retainFailure=true)
+        health.expired();assertEquals(LocationCheckStatus.EXPIRED,health.value.status)
+        health.sdkError(13);health.expired();assertEquals(LocationCheckStatus.SDK_ERROR,health.value.status)
+    }
     @Test fun `waiting and expiry cannot erase an SDK error`() {
         val health=LocationHealthTracker(true,true)
         health.sdkError(4)

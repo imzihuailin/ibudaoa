@@ -2,19 +2,22 @@ package io.github.ibudaoa.running
 
 import io.github.ibudaoa.capture.AutomaticRunGateway
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
 
 internal class AutomaticRunController(val ledger:RunTaskLedger,val timeline:AutomaticRouteRun,
     private val gateway:AutomaticRunGateway,private val gyroRequired:Boolean,private val bound:()->Boolean,
     private val preparationCurrent:()->Boolean,private val clock:()->Long) {
     @Volatile private var foreground=true
     @Volatile private var starting=false
+    private val operations=Mutex()
     private var lastUpload=-1L
-    private var uploadedVisits=0
+    private val acknowledgedIds=java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val requiredPoints=ledger.requestContext().points.size
-    private var problem:String?=null
+    @Volatile private var problem:String?=null
     @Volatile private var desiredPause=false
     @Volatile private var finishing=false
-    val summary:AutomaticRunSummary get() {
+    @Volatile private var ruleProblems:Set<RunCompletionProblem> = emptySet()
+    @get:Synchronized val summary:AutomaticRunSummary get() {
         val task=ledger.summary
         val phase=when {
             task.phase==RunTaskPhase.VALID -> AutomaticRunPhase.VALID
@@ -27,52 +30,85 @@ internal class AutomaticRunController(val ledger:RunTaskLedger,val timeline:Auto
         }
         return AutomaticRunSummary(phase,timeline.current()?.meters ?: 0.0,timeline.totalMeters,timeline.elapsedMillis/1000,
             timeline.checkpoints().size,requiredPoints,task.platformStarted,task.recordBound,task.recordVerified,problem,ledger.serverPointCount(),ledger.serverRecordStatus(),
-            ((timeline.durationMillis-timeline.activeMillis).coerceAtLeast(0)+999)/1000,ledger.pendingWrite()?.name,ledger.finishStage(),ledger.identityChecks())
+            ((timeline.durationMillis-timeline.activeMillis).coerceAtLeast(0)+999)/1000,ledger.pendingWrite()?.name,ledger.finishStage(),ledger.identityChecks(),ruleProblems,acknowledgedIds.size)
     }
     suspend fun start():Boolean {
-        if(starting || ledger.summary.phase!=RunTaskPhase.PREPARED || !bound() || !preparationCurrent())return false
+        if(!operations.tryLock())return false
+        return try { startLocked() } finally { operations.unlock() }
+    }
+    private suspend fun startLocked():Boolean {
+        if(!foreground || starting || ledger.summary.phase!=RunTaskPhase.PREPARED || !bound() || !preparationCurrent())return false
+        gateway.preparationProblem()?.let { problem=it;return false }
         starting=true
         try {
             if(!send(RunWrite.SELECT_ZONE))return false
-            if(!bound() || !preparationCurrent()) { interrupt();return false }
+            if(!foreground || !bound() || !preparationCurrent()) { problem="PREPARATION_CHANGED";interrupt();return false }
             if(!send(RunWrite.REGISTER))return false
-            if(!foreground || !bound() || ledger.summary.phase!=RunTaskPhase.RUNNING)return false
-            timeline.start(clock());return true
+            synchronized(this) {
+                if(!foreground || !bound() || ledger.summary.phase!=RunTaskPhase.RUNNING)return false
+                if(!gateway.registrationTimeAccepted(ledger.requestContext().registeredStart!!)) {
+                    problem="REGISTRATION_TIME_MISMATCH";interrupt();return false
+                }
+                timeline.start(clock())
+            }
+            return true
         } finally { starting=false }
     }
     suspend fun tick() {
-        if(!foreground || !bound()) { interrupt();return }
-        if(ledger.summary.needsReconciliation)return
-        if(timeline.phase !in setOf(AutomaticRunPhase.RUNNING,AutomaticRunPhase.PAUSED,AutomaticRunPhase.FINISHING))return
-        timeline.advance(clock())
-        if(timeline.phase==AutomaticRunPhase.FINISHING) { finish();return }
-        if(desiredPause && ledger.summary.phase==RunTaskPhase.RUNNING && !ledger.summary.writePending)ledger.pause()
-        if(timeline.phase==AutomaticRunPhase.RUNNING && (timeline.checkpoints().size>uploadedVisits || lastUpload<0 || timeline.elapsedMillis-lastUpload>=ledger.locationIntervalSeconds()*1000L)) {
-            if(send(RunWrite.LOCATION)) { lastUpload=timeline.elapsedMillis;uploadedVisits=minOf(timeline.checkpoints().size,uploadedVisits+1) }
-            if(desiredPause && ledger.summary.phase==RunTaskPhase.RUNNING && !ledger.summary.writePending)ledger.pause()
+        if(!operations.tryLock())return
+        try { tickLocked() } finally { operations.unlock() }
+    }
+    private suspend fun tickLocked() {
+        synchronized(this) {
+            if(!foreground || !bound()) { interrupt();return }
+            if(ledger.summary.needsReconciliation)return
+            if(timeline.phase !in setOf(AutomaticRunPhase.RUNNING,AutomaticRunPhase.PAUSED,AutomaticRunPhase.FINISHING))return
+            timeline.advance(clock())
+        }
+        if(timeline.phase==AutomaticRunPhase.PAUSED)updateRuleProblems()
+        if(timeline.phase==AutomaticRunPhase.FINISHING) { finishLocked();return }
+        applyPauseIfIdle()
+        val current=timeline.current()
+        if(timeline.phase==AutomaticRunPhase.RUNNING && current!=null && (timeline.checkpointIdsAt(current).any { it !in acknowledgedIds } ||
+                lastUpload<0 || timeline.elapsedMillis-lastUpload>=ledger.locationIntervalSeconds()*1000L)) {
+            reportLocation(current)
+            applyPauseIfIdle()
         }
     }
-    fun pause() {
+    @Synchronized fun pause() {
         if(!foreground || finishing)return
         desiredPause=true;timeline.pause(clock())
         if(ledger.summary.phase==RunTaskPhase.RUNNING && !ledger.summary.writePending)ledger.pause()
+        if(timeline.phase==AutomaticRunPhase.PAUSED)updateRuleProblems()
     }
-    fun resume():Boolean {
+    @Synchronized fun resume():Boolean {
         if(!foreground || !bound() || timeline.phase!=AutomaticRunPhase.PAUSED || ledger.summary.needsReconciliation)return false
         desiredPause=false
         if(ledger.summary.phase==RunTaskPhase.PAUSED)ledger.resume()
-        timeline.resume(clock());return true
+        timeline.resume(clock());ruleProblems=emptySet();return true
     }
     suspend fun finish():Boolean {
-        if(finishing || !foreground || !bound() || ledger.summary.writePending || ledger.summary.phase !in setOf(RunTaskPhase.RUNNING,RunTaskPhase.PAUSED))return false
-        timeline.freeze(clock());finishing=true
+        if(!operations.tryLock())return false
+        return try { finishLocked() } finally { operations.unlock() }
+    }
+    private suspend fun finishLocked():Boolean {
+        val snapshot=synchronized(this) {
+            if(finishing || !foreground || !bound() || ledger.summary.writePending || ledger.summary.phase !in setOf(RunTaskPhase.RUNNING,RunTaskPhase.PAUSED))return false
+            timeline.freeze(clock(),ledger.requestContext());finishing=true
+            timeline.completion()
+        }
         try {
-            while(uploadedVisits<timeline.checkpoints().size) {
-                if(!send(RunWrite.LOCATION))return false
-                uploadedVisits++
+            try { gateway.validateCompletion(ledger.requestContext(),snapshot) }
+            catch(e:RunMaterialException) {
+                problem="MATERIAL_${e.problem.name}";ledger.recordMaterialFailure(e.problem);interrupt();return false
             }
-            timeline.freeze(clock())
+            // One current endpoint report only. Never flush historical visits as current positions.
+            val current=timeline.current()!!
+            if(timeline.checkpointIdsAt(current).any { it !in acknowledgedIds } && !reportLocation(current))return false
+            updateRuleProblems()
+            ledger.recordCompletionChecks(ruleProblems,acknowledgedIds.size)
             if(!send(RunWrite.FINISH))return false
+            if(!foreground || !bound())return false
             if(gyroRequired) {
                 val record=ledger.expectedRecord();val permit=ledger.begin(RunWrite.GYROSCOPE)
                 try {
@@ -85,13 +121,17 @@ internal class AutomaticRunController(val ledger:RunTaskLedger,val timeline:Auto
             for (wait in delays) {
                 if (wait > 0) kotlinx.coroutines.delay(wait)
                 if (!foreground || !bound()) return false
-                if (query()) return true
+                if (queryLocked()) return true
                 if (ledger.summary.phase == RunTaskPhase.INVALID || problem == "RECORD_MISMATCH") return false
             }
             return false
         } finally { finishing=false }
     }
     suspend fun query():Boolean {
+        if(!operations.tryLock())return false
+        return try { queryLocked() } finally { operations.unlock() }
+    }
+    private suspend fun queryLocked():Boolean {
         if(!foreground || !bound() || !ledger.summary.recordBound)return false
         val body=try { gateway.record(ledger.requestContext(),ledger.expectedRecord()) }
             catch(e:CancellationException) { throw e } catch(_:Exception) { problem="RECORD_QUERY_FAILED";return false }
@@ -105,19 +145,34 @@ internal class AutomaticRunController(val ledger:RunTaskLedger,val timeline:Auto
             result.platformValid
         } finally { body.fill(0) }
     }
-    fun interrupt() {
+    @Synchronized fun interrupt() {
         foreground=false
         if(timeline.phase!=AutomaticRunPhase.IDLE)timeline.interrupt(clock())
         ledger.background()
     }
-    fun returned() { foreground=true;ledger.foreground() }
-    private suspend fun send(kind:RunWrite):Boolean {
+    @Synchronized fun returned() { foreground=true;ledger.foreground() }
+    @Synchronized private fun applyPauseIfIdle() {
+        if(foreground && desiredPause && ledger.summary.phase==RunTaskPhase.RUNNING && !ledger.summary.writePending)ledger.pause()
+    }
+    private fun updateRuleProblems() {
+        val snapshot=timeline.inspection()
+        ruleProblems=gateway.completionProblems(ledger.requestContext(),snapshot)+
+            (if(acknowledgedIds.containsAll(snapshot.ids))emptySet() else setOf(RunCompletionProblem.CHECKPOINT_REPORTS))
+    }
+    private suspend fun reportLocation(point:AutomaticRunSample):Boolean {
+        val ids=timeline.checkpointIdsAt(point)
+        return send(RunWrite.LOCATION,point).also { ok ->
+            if(ok) { acknowledgedIds.addAll(ids);lastUpload=point.elapsedMillis }
+        }
+    }
+    private suspend fun send(kind:RunWrite,location:AutomaticRunSample?=null):Boolean {
         if(!foreground || !bound())return false
         val permit=ledger.begin(kind)
         return try {
-            val body=gateway.write(kind,ledger.requestContext(),timeline,ledger::markFinishStage)
+            val body=gateway.write(kind,ledger.requestContext(),timeline,ledger::markFinishStage,location)
             try { ledger.accept(permit,body).also { if(!it)problem="WRITE_RESULT_UNCERTAIN" } } finally { body.fill(0) }
         } catch(e:CancellationException) { ledger.uncertain(permit);throw e }
+        catch(e:RunMaterialException) { ledger.uncertain(permit);problem="MATERIAL_${e.problem.name}";false }
         catch(_:Exception) { ledger.uncertain(permit);problem="WRITE_RESULT_UNCERTAIN";false }
     }
 }

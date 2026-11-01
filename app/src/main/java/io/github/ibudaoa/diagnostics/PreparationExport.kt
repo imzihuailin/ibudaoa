@@ -50,6 +50,8 @@ object PreparationExport {
                 auto.serverPointCount?.takeIf { it in 0..24 }?.let { put("server_checkins",it) }
                 auto.serverStatus?.takeIf { it in -1..1000 }?.let { put("server_record_status",it) }
                 auto.problem?.takeIf { it.matches(Regex("[A-Z_]{1,80}")) }?.let { put("problem",it) }
+                put("completion_checks",JsonArray(auto.ruleProblems.sortedBy { it.name }.map { JsonPrimitive(it.name) }))
+                auto.acknowledgedPoints.takeIf { it in 0..24 }?.let { put("acknowledged_points",it) }
             }) }
             sensors?.takeIf { it.steps in 0..100_000 && listOf(it.stepCallbacks,it.accelerationCallbacks,it.gyroscopeCallbacks,it.pairedSamples,it.rejected).all { n -> n in 0..1_000_000 } }?.let { check ->
                 put("run_sensor_check",buildJsonObject {
@@ -65,6 +67,12 @@ object PreparationExport {
                 put("run_checks_shape",check.runChecks.name);put("android_checks_shape",check.androidChecks.name)
                 check.gyroscopeRequired?.let { put("gyroscope_required",it) }
                 put("verification_supported",check.verificationSupported);put("supported",check.automaticSupported)
+                put("device_check",check.deviceCheck.name);put("gee_device_check",check.geeDeviceCheck.name);put("time_check",check.timeCheck.name)
+                check.blockingProblem?.let { put("blocking_problem",it.name) }
+                put("verification_checks",buildJsonObject {
+                    check.verificationChecks.filterKeys { it in setOf("is_check_geetest","is_check_shumeng","is_check_deepkonw","robot_module") }
+                        .forEach { (name,value) -> put(name,value.name) }
+                })
             }) }
             runningPlan?.let { plan -> put("running_plan",buildJsonObject {
                 put("phase",plan.phase.name);plan.problem?.let { put("problem",it.name) }

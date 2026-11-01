@@ -140,42 +140,42 @@ class MainActivity : ComponentActivity() {
                     canRequestLocation(),
                     ::requestLocationPermission)) {
                 IbudaoaTheme {
-                    IbudaoaApp(
-                        state = state,
-                        events = model.events,
-                        onDiagnosticMode = model::setDiagnosticMode,
-                        onAcknowledgePreparation = { model.continuePreparation(lifecycle) },
-                        onImport = { importConfig.launch(arrayOf("application/json", "text/plain")) },
-                        onExport = { if(state.automaticRun.blocksExternalUi)model.showMessage("请等待本次执行与记录核对结束后再导出，打开文件选择器会离开前台。") else exportConfig.launch("ibudaoa-diagnostic.json") },
-                        onExportConnectionReport = { if(state.automaticRun.blocksExternalUi)model.showMessage("请等待本次执行与记录核对结束后再导出。") else exportConnectionReport.launch("ibudaoa-connection-report.json") },
-                        onClear = model::clearDiagnostic,
-                        onMessage = model::showMessage,
-                        onMapConsent = model::setMapConsent,
-                        onLocationStartupHandled = model::acknowledgeLocationStartup,
-                        onReconnect = model::reconnectAccount,
-                        onAccountReadCheck = model::continueAccountSession,
-                        onVerifyAccountSession = model::verifyAccountSession,
-                        onDisconnectAccountSession = model::disconnectAccountSession,
-                        onCheckRoadGaps = { model.checkRoadGaps(lifecycle) },
-                        onSetManualGap = model::setManualGap,
-                        onSetReviewedDirection = model::setReviewedDirection,
-                        onConfirmAllDirections = model::confirmAllReviewedDirections,
-                        onConfirmAllRoadConnections = model::confirmAllRoadConnectionsAndDirections,
-                        onDisplayFix = model::updateDisplayFix,
-                        onLocationDiagnostics = model::updateLocationDiagnostics,
-                        onPrepareLocalPreview = model::prepareLocalPreview,
-                        onPrepareRunningPlan = { model.prepareRunningPlan(lifecycle) },
-                        onAutomaticAction = { model.automaticAction(lifecycle) },
-                        onFinishAutomatic = model::finishAutomatic,
-                        onArchiveAutomatic = model::archiveManuallyReviewedAutomatic,
-                        onCheckUpdates = model::checkUpdates,
-                        onConfirmPreviewOrigin = model::confirmLocalPreviewOrigin,
-                        onClosePreviewReview = model::closeLocalPreviewReview,
-                        onCancelCapture = {
-                            model.cancelCapture()
-                            CaptureVpnService.stopOwned(this)
-                        },
-                    )
+                    io.github.ibudaoa.maps.ForegroundLocationProvider(
+                        enabled=BuildConfig.MAP_KEY_CONFIGURED && state.mapConsent && state.config!=null,
+                        permissionRevision=locationRevision,onFix=model::updateDisplayFix,onDiagnostics=model::updateLocationDiagnostics,
+                    ) {
+                        IbudaoaApp(
+                            state = state,
+                            events = model.events,
+                            onDiagnosticMode = model::setDiagnosticMode,
+                            onAcknowledgePreparation = { model.continuePreparation(lifecycle) },
+                            onImport = { importConfig.launch(arrayOf("application/json", "text/plain")) },
+                            onExport = { if(state.automaticRun.blocksExternalUi)model.showMessage("请等待本次执行与记录核对结束后再导出，打开文件选择器会离开前台。") else exportConfig.launch("ibudaoa-diagnostic.json") },
+                            onExportConnectionReport = { if(state.automaticRun.blocksExternalUi)model.showMessage("请等待本次执行与记录核对结束后再导出。") else exportConnectionReport.launch("ibudaoa-connection-report.json") },
+                            onClear = model::clearDiagnostic,
+                            onMessage = model::showMessage,
+                            onMapConsent = model::setMapConsent,
+                            onLocationStartupHandled = model::acknowledgeLocationStartup,
+                            onReconnect = model::reconnectAccount,
+                            onCheckRoadGaps = { model.checkRoadGaps(lifecycle) },
+                            onSetManualGap = model::setManualGap,
+                            onSetReviewedDirection = model::setReviewedDirection,
+                            onConfirmAllDirections = model::confirmAllReviewedDirections,
+                            onConfirmAllRoadConnections = model::confirmAllRoadConnectionsAndDirections,
+                            onPrepareLocalPreview = model::prepareLocalPreview,
+                            onPrepareRunningPlan = { model.prepareRunningPlan(lifecycle) },
+                            onAutomaticAction = { model.automaticAction(lifecycle) },
+                            onFinishAutomatic = model::finishAutomatic,
+                            onArchiveAutomatic = model::archiveManuallyReviewedAutomatic,
+                            onCheckUpdates = model::checkUpdates,
+                            onConfirmPreviewOrigin = model::confirmLocalPreviewOrigin,
+                            onClosePreviewReview = model::closeLocalPreviewReview,
+                            onCancelCapture = {
+                                model.cancelCapture()
+                                CaptureVpnService.stopOwned(this)
+                            },
+                        )
+                    }
                 }
             }
         }

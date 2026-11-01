@@ -114,6 +114,18 @@ class RunningPlanTest {
             assertFalse(key,OnlineConfigurationCompatibility.compatible(config,unsafe))
         }
     }
+    @Test fun `start recheck refuses closing time and next day without changing the prepared route`() {
+        val plan=RunningPlanRules.create(config,draft(),now,zone).first!!
+        assertNull(RunningPlanRules.recheck(config,plan,now.plusSeconds(10),zone))
+        assertEquals(RunningPlanProblem.TIME_REMAINING,RunningPlanRules.recheck(config,plan,Instant.parse("2026-10-28T13:59:55Z"),zone))
+        assertNotNull(RunningPlanRules.recheck(config,plan,now.plusSeconds(86400),zone))
+    }
+    @Test fun `start recheck rejects changed pace even when the route still meets distance limits`() {
+        val plan=RunningPlanRules.create(config,draft(),now,zone).first!!
+        val rule=config.config.getValue("time_rule_arr").jsonArray.single().jsonObject
+        val cfg=changed("time_rule_arr",JsonArray(listOf(JsonObject(rule+("max_pace" to JsonPrimitive(240))))))
+        assertNotNull(RunningPlanRules.recheck(cfg,plan,now,zone))
+    }
     @Test fun `plan exports only aggregate values and importing it grants no plan or motion`() {
         val summary=RunningPlanRules.create(config,draft(),now,zone).second
         val text=PreparationExport.encode(config,1,1,null,runningPlan=summary)
