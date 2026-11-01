@@ -284,12 +284,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun updateDisplayFix(fix: DisplayFix?) { mutableState.update { it.copy(displayFix = fix) } }
     fun updateLocationDiagnostics(snapshot: LocationDiagnostics) { mutableState.update { it.copy(locationDiagnostics=snapshot) } }
 
-    fun closeLocalPreviewReview() {
-        previewJob?.cancel()
-        if(preparingRun) blockRunningPlan(RunningPlanProblem.ORIGIN)
-        mutableState.update { it.copy(localPreview = null) }
-    }
-
     private var runPreparationStage:String?=null
     private fun blockRunningPlan(problem:RunningPlanProblem) {
         preparingRun=false;runGrant=null;preparedRunningPlan=null
@@ -407,9 +401,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 when(result) {
                     is PreviewPreparation.Ready -> {
                         runGrant=grant
-                        mutableState.update { it.copy(localPreview=result.preview,previewPoints=result.preview.points,
-                            previewSummary=LocalPreviewSummary(graph.scope,PreviewPhase.REVIEW_ORIGIN,result.preview.points.selectedIds.size,originGapMeters=result.preview.proposal.gapMeters),
-                            runningPlanSummary=RunningPlanSummary(RunningPlanPhase.REVIEW_ORIGIN)) }
+                        mutableState.update { it.copy(localPreview=result.preview,previewPoints=result.preview.points) }
+                        buildValidatedPreview()
                     }
                     is PreviewPreparation.Blocked -> blockRunningPlan(when(result.problem) {
                         PreviewProblem.LOCATION_REQUIRED,PreviewProblem.POSITION_CHANGED -> RunningPlanProblem.LOCATION
@@ -668,9 +661,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (state.value.config != config || state.value.roadGraph !== graph) return@launch
                 when (result) {
-                    is PreviewPreparation.Ready -> mutableState.update { it.copy(localPreview=result.preview,
-                        previewPoints=result.preview.points,previewSummary=LocalPreviewSummary(graph.scope,PreviewPhase.REVIEW_ORIGIN,
-                            result.preview.points.selectedIds.size,originGapMeters=result.preview.proposal.gapMeters)) }
+                    is PreviewPreparation.Ready -> {
+                        mutableState.update { it.copy(localPreview=result.preview,previewPoints=result.preview.points) }
+                        buildValidatedPreview()
+                    }
                     is PreviewPreparation.Blocked -> {
                         mutableState.update { it.copy(previewSummary=LocalPreviewSummary(graph.scope,PreviewPhase.BLOCKED,
                             problem=result.problem,pointProblem=result.pointProblem)) }
@@ -685,37 +679,31 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun confirmLocalPreviewOrigin() {
+    private suspend fun buildValidatedPreview() {
         val snapshot = state.value
-        if (snapshot.busy || snapshot.capture.active) return
-        if(preparingRun && runGrant?.let { AccountSessionRuntime.session.isCurrent(it,Instant.now().epochSecond) }!=true)
-            return blockRunningPlan(RunningPlanProblem.ONLINE_EXPIRED)
         val config=snapshot.config ?: return
-        if(preparingRun && runGrant?.config?.let(RunningRoadSnapshot::canonical)!=config) return blockRunningPlan(RunningPlanProblem.CONFIGURATION_CHANGED)
         val graph=snapshot.roadGraph ?: return
         val preview=snapshot.localPreview ?: return
-        mutableState.update { it.copy(busy=true) }
-        previewJob=viewModelScope.launch {
             try {
                 val (updated,summary)=withContext(Dispatchers.Default) {
-                    LocalRoutePreviewEngine.confirm(config,snapshot.capturedConfig,graph,preview,snapshot.displayFix,
+                    LocalRoutePreviewEngine.validateAndBuild(config,snapshot.capturedConfig,graph,preview,snapshot.displayFix,
                         Instant.now(),SystemClock.elapsedRealtime(),ZoneId.of("Asia/Shanghai"),AmapDistance())
                 }
-                if (state.value.config != config || state.value.roadGraph !== graph || state.value.localPreview !== preview) return@launch
+                if (state.value.config != config || state.value.roadGraph !== graph || state.value.localPreview !== preview) return
                 val after=LocalRoutePreviewEngine.reviewProblem(config,state.value.capturedConfig,graph,preview,state.value.displayFix,
                     Instant.now(),SystemClock.elapsedRealtime(),ZoneId.of("Asia/Shanghai"),AmapDistance())
                 if (after != null) {
-                    if(preparingRun) return@launch blockRunningPlan(if(after in setOf(PreviewProblem.LOCATION_REQUIRED,PreviewProblem.POSITION_CHANGED))
+                    if(preparingRun) return blockRunningPlan(if(after in setOf(PreviewProblem.LOCATION_REQUIRED,PreviewProblem.POSITION_CHANGED))
                         RunningPlanProblem.LOCATION else RunningPlanProblem.ROADS)
                     mutableState.update { it.copy(localPreview=null,previewSummary=LocalPreviewSummary(graph.scope,PreviewPhase.BLOCKED,
                         preview.points.selectedIds.size,problem=after)) }
                     showMessage(after.label)
-                    return@launch
+                    return
                 }
                 if(preparingRun) {
                     val grant=runGrant
                     if(grant==null || !AccountSessionRuntime.session.isCurrent(grant,Instant.now().epochSecond))
-                        return@launch blockRunningPlan(RunningPlanProblem.ONLINE_EXPIRED)
+                        return blockRunningPlan(RunningPlanProblem.ONLINE_EXPIRED)
                     val route=updated?.route ?: run {
                         mutableState.update { it.copy(localPreview=updated, previewSummary=summary) }
                         val reason = when (summary.routeProblem) {
@@ -725,13 +713,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             io.github.ibudaoa.roads.RoutePlanProblem.START_NOT_ON_ROAD -> RunningPlanProblem.ACCESS_ROUTE
                             else -> RunningPlanProblem.ROADS
                         }
-                        return@launch blockRunningPlan(reason)
+                        return blockRunningPlan(reason)
                     }
                     val (plan,planSummary)=RunningPlanRules.create(config,route,Instant.now(),ZoneId.of("Asia/Shanghai"))
                     preparedRunningPlan=plan;preparingRun=false
                     mutableState.update { it.copy(localPreview=updated,previewSummary=summary,runningPlanSummary=planSummary) }
                     showMessage(planSummary.problem?.label ?: "本次距离、配速和路线计划已生成，尚未创建运动。")
-                    return@launch
+                    return
                 }
                 mutableState.update { it.copy(localPreview=updated,previewSummary=summary) }
                 showMessage(if (updated?.route != null) "本地路线草稿已生成，尚未开始运动。"
@@ -742,7 +730,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 else { mutableState.update { it.copy(localPreview=null) };showMessage("本地路线计算未完成，请重试。") }
             }
             finally { mutableState.update { it.copy(busy=false) }; previewJob=null }
-        }
     }
 
     fun acknowledgePreparation() = operation {

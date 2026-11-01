@@ -91,7 +91,7 @@ object LocalRoutePreviewEngine {
         return null
     }
 
-    fun confirm(config: DiagnosticConfig, captured: Boolean, graph: ObservedRoadGraph, preview: LocalRoutePreview,
+    fun validateAndBuild(config: DiagnosticConfig, captured: Boolean, graph: ObservedRoadGraph, preview: LocalRoutePreview,
         fix: DisplayFix?, now: Instant, elapsed: Long, zone: ZoneId, distance: PlatformDistance): Pair<LocalRoutePreview?, LocalPreviewSummary> {
         fun blocked(p: PreviewProblem) = null to LocalPreviewSummary(graph.scope,PreviewPhase.BLOCKED,
             preview.points.selectedIds.size,problem=p)
@@ -106,4 +106,9 @@ object LocalRoutePreviewEngine {
             preview.points.selectedIds.size,true,preview.proposal.gapMeters,route?.upperDistanceMeters,
             if (route == null) PreviewProblem.ROUTE_UNAVAILABLE else null,routeProblem=issue)
     }
+
+    // Compatibility alias for existing offline tests and historical callers.
+    fun confirm(config: DiagnosticConfig, captured: Boolean, graph: ObservedRoadGraph, preview: LocalRoutePreview,
+        fix: DisplayFix?, now: Instant, elapsed: Long, zone: ZoneId, distance: PlatformDistance) =
+        validateAndBuild(config, captured, graph, preview, fix, now, elapsed, zone, distance)
 }

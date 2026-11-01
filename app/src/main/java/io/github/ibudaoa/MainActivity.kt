@@ -168,8 +168,6 @@ class MainActivity : ComponentActivity() {
                             onFinishAutomatic = model::finishAutomatic,
                             onArchiveAutomatic = model::archiveManuallyReviewedAutomatic,
                             onCheckUpdates = model::checkUpdates,
-                            onConfirmPreviewOrigin = model::confirmLocalPreviewOrigin,
-                            onClosePreviewReview = model::closeLocalPreviewReview,
                             onCancelCapture = {
                                 model.cancelCapture()
                                 CaptureVpnService.stopOwned(this)

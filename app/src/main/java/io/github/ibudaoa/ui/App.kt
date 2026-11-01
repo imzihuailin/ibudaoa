@@ -137,8 +137,6 @@ fun IbudaoaApp(
     onArchiveAutomatic: () -> Unit,
     onCheckUpdates: () -> Unit,
     onDiagnosticMode: (Boolean) -> Unit,
-    onConfirmPreviewOrigin: () -> Unit,
-    onClosePreviewReview: () -> Unit,
 ) {
     var showRoadDirections by rememberSaveable { mutableStateOf(false) }
     var directionIndex by rememberSaveable { mutableStateOf(0) }
@@ -150,7 +148,6 @@ fun IbudaoaApp(
     var showSummary by rememberSaveable { mutableStateOf(false) }
     var confirmClear by rememberSaveable { mutableStateOf(false) }
     var showGapCheck by rememberSaveable { mutableStateOf(false) }
-    val reviewingOrigin = state.localPreview != null && state.previewSummary?.phase == PreviewPhase.REVIEW_ORIGIN
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(events) { events.collect { snackbar.showSnackbar(it) } }
     val locationPermission = io.github.ibudaoa.maps.LocalLocationPermission.current
@@ -234,7 +231,7 @@ fun IbudaoaApp(
                     onAutomaticAction = onAutomaticAction,
                     onFinishAutomatic = onFinishAutomatic,
                     onArchiveAutomatic = onArchiveAutomatic,
-                    mapActive = !showWarmup && !showSummary && !confirmClear && !showGapCheck && !showManualGaps && !showRoadDirections && !reviewingOrigin && !state.capture.active,
+                    mapActive = !showWarmup && !showSummary && !confirmClear && !showGapCheck && !showManualGaps && !showRoadDirections && !state.capture.active,
                 )
                 Destination.SETTINGS -> SettingsPage(
                     state = state,
@@ -243,34 +240,6 @@ fun IbudaoaApp(
                     onMessage = onMessage,
                     onCheckUpdates=onCheckUpdates, onDiagnosticMode=onDiagnosticMode,
                 )
-            }
-        }
-    }
-
-    val originPreview = state.localPreview
-    if (reviewingOrigin && originPreview != null && state.config != null) {
-        Dialog(onDismissRequest = onClosePreviewReview, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-                CampusMap(state.config,state.mapConsent,true,state.roadEvidence,null,
-                    modifier=Modifier.fillMaxSize(),originProposal=originPreview.proposal,
-                    selectedIds=originPreview.points.selectedIds)
-                Surface(Modifier.align(Alignment.TopCenter).fillMaxWidth(),color=MaterialTheme.colorScheme.surfaceContainer) {
-                    Row(Modifier.statusBarsPadding().padding(12.dp),verticalAlignment=Alignment.CenterVertically) {
-                        Text("核对预览起点",Modifier.weight(1f),style=MaterialTheme.typography.titleMedium)
-                        TextButton(onClick=onClosePreviewReview) { Text("取消") }
-                    }
-                }
-                Surface(Modifier.align(Alignment.BottomCenter).fillMaxWidth(),color=MaterialTheme.colorScheme.surfaceContainer,
-                    shape=RoundedCornerShape(topStart=20.dp,topEnd=20.dp)) {
-                    Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                        Text("请确认起点位置正确，橙色接入建议可以到达参考路线。")
-                        Text("若位置不对或连接不能通过，请取消并反馈，不要确认。")
-                        Text("接入参考约 ${kotlin.math.ceil(originPreview.proposal.gapMeters).toInt()} 米，已计入计划总距离；拟定 ${originPreview.points.selectedIds.size} 个点。尚未开始运动。")
-                        Text("程序从确认的当前位置沿本次固定路线自动推进，接入段计入总距离；无需本人走跑。")
-                        Button(onClick=onConfirmPreviewOrigin,enabled=!state.busy && state.displayFix != null,
-                            modifier=Modifier.fillMaxWidth()) { Text(if (state.busy) "正在计算路线…" else "确认位置与连接，生成草稿") }
-                    }
-                }
             }
         }
     }
@@ -612,7 +581,7 @@ internal fun MapPage(
                     ?: state.gapEvidence?.let { Text("已保存 ${it.records.size} 处道路间隔结果，可继续检查或导出。") }
                 state.previewSummary?.takeIf { !runningPage || it.phase != PreviewPhase.DRAFT }?.let { preview ->
                     Text(if (preview.phase == PreviewPhase.DRAFT) "${if (state.localPreview?.route != null) "本地草稿" else "上次本地预览"}约 ${String.format(Locale.ROOT,"%.2f",(preview.routeMeters ?: 0.0)/1000)} km · 拟定 ${preview.selectedCount} 个点"
-                        else preview.pointProblem?.label ?: preview.problem?.label ?: "等待核对预览起点")
+                        else preview.pointProblem?.label ?: preview.problem?.label ?: "正在检查当前位置和道路接入")
                 }
                 Spacer(Modifier.height(22.dp))
                 if (runningPage) {
@@ -631,7 +600,6 @@ internal fun MapPage(
                         io.github.ibudaoa.running.RunningPlanPhase.SYNCING -> "正在同步规则并保留已确认道路"
                         io.github.ibudaoa.running.RunningPlanPhase.WAITING_LOCATION -> "等待新鲜准确的前台定位"
                         io.github.ibudaoa.running.RunningPlanPhase.CONNECTING_ROUTE -> "正在规划当前位置到参考路线的接入路段"
-                        io.github.ibudaoa.running.RunningPlanPhase.REVIEW_ORIGIN -> "请核对起点到道路的连接"
                         io.github.ibudaoa.running.RunningPlanPhase.PLANNED -> "本次计划 · 预计${((state.runningPlanSummary.durationSeconds ?: 0)+59)/60}分钟"
                         else -> "计划尚未就绪"
                     })
