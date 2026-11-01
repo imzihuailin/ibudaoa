@@ -102,6 +102,7 @@ data class AppState(
     val previewSummary: LocalPreviewSummary? = null,
     val automaticRun:AutomaticRunSummary=AutomaticRunSummary(),
     val automaticFailureReason:String?=null,
+    val automaticNotice:String?=null,
     val automaticRoute:FixedPointRoute?=null,
     val automaticPosition:io.github.ibudaoa.domain.CampusCoordinate?=null,
     val executionRequirements:RunRuntimeRequirements?=null,
@@ -440,7 +441,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             AutomaticRunPhase.INVALID -> io.github.ibudaoa.domain.SessionPhase.INVALID
             else -> io.github.ibudaoa.domain.SessionPhase.INTERRUPTED
         }
-        mutableState.update { it.copy(automaticRun=summary,automaticPosition=automaticController?.timeline?.current()?.coordinate,automaticFailureReason=automaticController?.ledger?.failureReasonForDisplay(),session=SessionState(phase,needsReconciliation=summary.phase==AutomaticRunPhase.INTERRUPTED)) }
+        val failureReason=automaticController?.ledger?.failureReasonForDisplay()
+        mutableState.update { current ->
+            val notice=if(summary.phase==AutomaticRunPhase.INVALID && current.automaticRun.phase!=AutomaticRunPhase.INVALID)
+                failureReason?.takeIf { it.isNotBlank() }?.let { "本次记录未达判定标准：$it" } ?: "本次记录未达判定标准"
+            else current.automaticNotice
+            current.copy(automaticRun=summary,automaticPosition=automaticController?.timeline?.current()?.coordinate,
+                automaticFailureReason=failureReason,
+                automaticNotice=notice,
+                session=SessionState(phase,needsReconciliation=summary.phase==AutomaticRunPhase.INTERRUPTED))
+        }
     }
     fun automaticAction(lifecycle:Lifecycle) {
         if(state.value.busy || !automaticJournalChecked)return
@@ -565,8 +575,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             previous?.cancel();previous?.join()
             mutableState.update { it.copy(busy=true) }
             try {
-                when(val review=controller.reviewFinish()) {
-                    is AutomaticFinishReview.Incomplete -> discardIncompleteAutomatic(controller,review.problems)
+                when(controller.reviewFinish()) {
+                    is AutomaticFinishReview.Incomplete -> discardIncompleteAutomatic(controller)
                     else -> { controller.finish();publishAutomatic();releaseAutomaticIfResolved() }
                 }
             }
@@ -579,7 +589,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
-    private suspend fun discardIncompleteAutomatic(controller:AutomaticRunController,problems:Set<RunCompletionProblem>) {
+    private suspend fun discardIncompleteAutomatic(controller:AutomaticRunController) {
         withContext(NonCancellable) {
             val released=runCatching {
                 store.pointPlanningStorage.first().cache?.takeIf { it.locked }?.let { store.releaseResolvedPointCache(it) }
@@ -590,11 +600,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 automaticJournalPending=false;automaticController=null
                 preparedRunningPlan=null;runGrant=null
                 mutableState.update { it.copy(automaticRun=AutomaticRunSummary(),automaticFailureReason=null,
+                    automaticNotice="本次记录未达判定标准",
                     automaticRoute=null,automaticPosition=null,session=SessionState(),
                     runningPlanSummary=RunningPlanSummary(),localPreview=null,previewPoints=null,previewSummary=null,
                     routeResult=null) }
-                val details=if(state.value.diagnosticMode) "："+problems.sortedBy { it.ordinal }.joinToString("、") { it.label } else ""
-                showMessage("本次未达到有效条件，已退出，未提交记录$details。")
             } else {
                 runCatching { controller.interrupt() };publishAutomatic()
                 showMessage("本次未能退出，请导出诊断。")
@@ -636,10 +645,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         automaticVerificationJob?.cancel();automaticVerificationJob=null
         automaticController=null
         preparedRunningPlan=null;runGrant=null
-        mutableState.update { it.copy(automaticRun=AutomaticRunSummary(),automaticFailureReason=null,
+        mutableState.update { it.copy(automaticRun=AutomaticRunSummary(),automaticFailureReason=null,automaticNotice=null,
             automaticRoute=null,automaticPosition=null,session=SessionState(),
             runningPlanSummary=RunningPlanSummary(),localPreview=null,previewPoints=null,previewSummary=null,
             routeResult=null) }
+    }
+    fun dismissAutomaticNotice() {
+        if(state.value.automaticNotice==null)return
+        mutableState.update { it.copy(automaticNotice=null) }
     }
     fun onAutomaticForegroundReturned() {
         val controller=automaticController

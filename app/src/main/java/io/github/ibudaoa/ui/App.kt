@@ -3,6 +3,7 @@ package io.github.ibudaoa.ui
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -39,6 +40,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -50,8 +52,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -73,6 +75,7 @@ import io.github.ibudaoa.maps.CampusMap
 import io.github.ibudaoa.preview.PreviewPhase
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -163,6 +166,7 @@ fun IbudaoaApp(
     onAutomaticAction: () -> Unit,
     onFinishAutomatic: () -> Unit,
     onAutomaticComplete: () -> Unit,
+    onDismissAutomaticNotice: () -> Unit,
     onArchiveAutomatic: () -> Unit,
     onCheckUpdates: () -> Unit,
     onDiagnosticMode: (Boolean) -> Unit,
@@ -180,6 +184,12 @@ fun IbudaoaApp(
     var showGapCheck by rememberSaveable { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(events) { events.collect { snackbar.showSnackbar(it) } }
+    LaunchedEffect(state.automaticNotice) {
+        state.automaticNotice?.let { message ->
+            snackbar.showSnackbar(message)
+            onDismissAutomaticNotice()
+        }
+    }
     val locationPermission = io.github.ibudaoa.maps.LocalLocationPermission.current
     var attemptedLocation by rememberSaveable(state.locationCheckCycle) { mutableStateOf(false) }
     var finishAfterLocation by rememberSaveable(state.locationCheckCycle) { mutableStateOf(false) }
@@ -235,7 +245,12 @@ fun IbudaoaApp(
     }
 
     Scaffold(
-        snackbarHost = { SnackbarHost(snackbar) },
+        snackbarHost = { SnackbarHost(snackbar) { data ->
+            val container=if(isSystemInDarkTheme()) MaterialTheme.colorScheme.primaryContainer else Color(0xFFE5F2E1)
+            val content=if(isSystemInDarkTheme()) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.primary
+            Snackbar(snackbarData = data, containerColor = container, contentColor = content,
+                actionColor = content, actionContentColor = content, dismissActionContentColor = content)
+        } },
         bottomBar = {
             AppNavigation(destination) { destination = it }
         },
@@ -712,8 +727,11 @@ internal fun MapPage(
                             Text(if(auto.phase==io.github.ibudaoa.running.AutomaticRunPhase.RUNNING) "暂停" else "继续",
                                 style=MaterialTheme.typography.titleLarge)
                         }
-                        OutlinedButton(onClick = onFinishAutomatic, modifier = Modifier.weight(1f).heightIn(min = 60.dp),
-                            shape = RoundedCornerShape(30.dp), enabled = !state.busy) {
+                        val endContainer=if(isSystemInDarkTheme()) MaterialTheme.colorScheme.primaryContainer else Color(0xFFE5F2E1)
+                        val endContent=if(isSystemInDarkTheme()) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.primary
+                        Button(onClick = onFinishAutomatic, modifier = Modifier.weight(1f).heightIn(min = 60.dp),
+                            shape = RoundedCornerShape(30.dp), enabled = !state.busy,
+                            colors = ButtonDefaults.buttonColors(containerColor=endContainer, contentColor=endContent)) {
                             Text("结束", style=MaterialTheme.typography.titleLarge)
                         }
                     }
