@@ -4,6 +4,12 @@ import io.github.ibudaoa.capture.AutomaticRunGateway
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 
+internal sealed interface AutomaticFinishReview {
+    data object Allowed : AutomaticFinishReview
+    data class Incomplete(val problems:Set<RunCompletionProblem>) : AutomaticFinishReview
+    data object Unavailable : AutomaticFinishReview
+}
+
 internal class AutomaticRunController(val ledger:RunTaskLedger,val timeline:AutomaticRouteRun,
     private val gateway:AutomaticRunGateway,private val gyroRequired:Boolean,private val bound:()->Boolean,
     private val preparationCurrent:()->Boolean,private val clock:()->Long) {
@@ -90,6 +96,34 @@ internal class AutomaticRunController(val ledger:RunTaskLedger,val timeline:Auto
     suspend fun finish():Boolean {
         if(!operations.tryLock())return false
         return try { finishLocked() } finally { operations.unlock() }
+    }
+    /**
+     * Reviews the current run against the current rules without writing or freezing it.
+     * The endpoint report state is excluded: the finish path reports the endpoint itself.
+     */
+    suspend fun reviewFinish():AutomaticFinishReview {
+        if(!operations.tryLock())return AutomaticFinishReview.Unavailable
+        return try {
+            synchronized(this) {
+                val task=ledger.summary
+                if(finishing || !foreground || !bound() || task.writePending ||
+                    task.phase !in setOf(RunTaskPhase.RUNNING,RunTaskPhase.PAUSED))
+                    return@synchronized AutomaticFinishReview.Unavailable
+                try { updateRuleProblems() }
+                catch(_:Exception) { return@synchronized AutomaticFinishReview.Unavailable }
+                val blocking=ruleProblems-RunCompletionProblem.CHECKPOINT_REPORTS
+                if(blocking.isEmpty())AutomaticFinishReview.Allowed else AutomaticFinishReview.Incomplete(blocking)
+            }
+        } finally { operations.unlock() }
+    }
+    /** Drops a run that was never submitted, so no record is kept locally or sent to the platform. */
+    @Synchronized fun discardUnfinished():Boolean {
+        if(!foreground || finishing || !ledger.canDiscardUnfinished())return false
+        return try {
+            timeline.interrupt(clock())
+            ledger.discardUnfinished()
+            true
+        } catch(_:Exception) { false }
     }
     private suspend fun finishLocked():Boolean {
         val snapshot=synchronized(this) {

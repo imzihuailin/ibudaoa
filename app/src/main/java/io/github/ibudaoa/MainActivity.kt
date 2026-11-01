@@ -166,6 +166,7 @@ class MainActivity : ComponentActivity() {
                             onPrepareRunningPlan = { model.prepareRunningPlan(lifecycle) },
                             onAutomaticAction = { model.automaticAction(lifecycle) },
                             onFinishAutomatic = model::finishAutomatic,
+                            onAutomaticComplete = model::completeAutomatic,
                             onArchiveAutomatic = model::archiveManuallyReviewedAutomatic,
                             onCheckUpdates = model::checkUpdates,
                             onCancelCapture = {

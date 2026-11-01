@@ -50,6 +50,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -161,6 +162,7 @@ fun IbudaoaApp(
     onPrepareRunningPlan: () -> Unit,
     onAutomaticAction: () -> Unit,
     onFinishAutomatic: () -> Unit,
+    onAutomaticComplete: () -> Unit,
     onArchiveAutomatic: () -> Unit,
     onCheckUpdates: () -> Unit,
     onDiagnosticMode: (Boolean) -> Unit,
@@ -258,6 +260,7 @@ fun IbudaoaApp(
                     onPrepareRunningPlan = onPrepareRunningPlan,
                     onAutomaticAction = onAutomaticAction,
                     onFinishAutomatic = onFinishAutomatic,
+                    onAutomaticComplete = onAutomaticComplete,
                     onArchiveAutomatic = onArchiveAutomatic,
                     mapActive = !showWarmup && !showSummary && !confirmClear && !showGapCheck && !showManualGaps && !showRoadDirections && !state.capture.active,
                 )
@@ -520,20 +523,14 @@ internal fun MapPage(
     onPrepareRunningPlan: () -> Unit,
     onAutomaticAction: () -> Unit,
     onFinishAutomatic: () -> Unit,
+    onAutomaticComplete: () -> Unit,
     onArchiveAutomatic: () -> Unit,
     mapActive: Boolean,
     mapBackground: (@Composable () -> Unit)? = null,
 ) {
     val roads = rememberRoadPreparation(state)
     var expanded by remember { mutableStateOf(false) }
-    var confirmAutomaticFinish by rememberSaveable { mutableStateOf(false) }
     var confirmArchive by rememberSaveable { mutableStateOf(false) }
-    if(confirmAutomaticFinish && state.automaticRun.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.RUNNING,io.github.ibudaoa.running.AutomaticRunPhase.PAUSED)) {
-        AlertDialog(onDismissRequest={confirmAutomaticFinish=false},title={Text("结束本次自动执行？")},
-            text={Text("已自动执行 %.2f km，经过 %d/%d 个点。结束后将提交本次记录。".format(Locale.ROOT,state.automaticRun.meters/1000,state.automaticRun.visitedPoints,state.automaticRun.requiredPoints))},
-            confirmButton={TextButton(onClick={confirmAutomaticFinish=false;onFinishAutomatic()}) { Text("结束并提交") }},
-            dismissButton={TextButton(onClick={confirmAutomaticFinish=false}) { Text("返回") }})
-    }
     if(confirmArchive)AlertDialog(onDismissRequest={confirmArchive=false},title={Text("归档本地待核对任务？")},
         text={Text("仅在你已核对官方客户端、确认没有对应记录时使用。原结束请求仍可能被延迟处理；归档不会删除平台记录，也不会重传原任务。本地加密日志会保留，归档后可重新准备。")},
         confirmButton={TextButton(onClick={confirmArchive=false;onArchiveAutomatic()}) { Text("已核对无记录，归档") }},
@@ -598,7 +595,7 @@ internal fun MapPage(
                         }
                     }
                 }
-                if (runningPage && state.preparationCompleted) {
+                if (runningPage && state.diagnosticMode && state.preparationCompleted) {
                     val preparationFailure = state.preparationError ?: when (roads?.report?.phase) {
                         RoadBatchPhase.FAILED -> "道路核对未完成，请点击完成准备后重试。"
                         RoadBatchPhase.INTERRUPTED -> "道路核对已中断，请点击完成准备后重试。"
@@ -669,46 +666,71 @@ internal fun MapPage(
                 if(active) {
                     LinearProgressIndicator(progress={auto.progressFraction},modifier=Modifier.fillMaxWidth().padding(vertical=8.dp))
                     val remaining=auto.remainingSeconds
-                    Text("执行进度 %d%% · 已用 %d分%02d秒".format(Locale.ROOT,(auto.progressFraction*100).toInt(),auto.elapsedSeconds/60,auto.elapsedSeconds%60),style=MaterialTheme.typography.bodySmall)
                     if(remaining!=null && auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.RUNNING,io.github.ibudaoa.running.AutomaticRunPhase.PAUSED))
-                        Text((if(auto.phase==io.github.ibudaoa.running.AutomaticRunPhase.PAUSED) "继续后预计还需 " else "预计剩余 ")+"%d分%02d秒（不含提交等待）".format(Locale.ROOT,remaining/60,remaining%60),style=MaterialTheme.typography.bodySmall)
-                    Text(when(auto.phase) {
-                        io.github.ibudaoa.running.AutomaticRunPhase.STARTING -> "正在登记本次自动任务"
-                        io.github.ibudaoa.running.AutomaticRunPhase.RUNNING -> "自动执行中 · %.2f / %.2f km · 经过 %d/%d 点".format(Locale.ROOT,auto.meters/1000,auto.targetMeters/1000,auto.visitedPoints,auto.requiredPoints)
-                        io.github.ibudaoa.running.AutomaticRunPhase.PAUSED -> "自动执行已暂停 · 保留原路线和点位，暂停计入总用时"
-                        io.github.ibudaoa.running.AutomaticRunPhase.FINISHING -> "正在自动上传并提交本次记录"
-                        io.github.ibudaoa.running.AutomaticRunPhase.AWAITING_VERDICT -> "记录已创建，等待核对平台判定"
-                        io.github.ibudaoa.running.AutomaticRunPhase.VALID -> "平台已确认本次记录有效"
-                        io.github.ibudaoa.running.AutomaticRunPhase.INVALID -> "本次记录未被判定有效"
-                        io.github.ibudaoa.running.AutomaticRunPhase.INTERRUPTED -> "自动任务已中断，需核对原记录"
-                        else -> "自动执行准备未完成，请导出诊断"
-                    },style=MaterialTheme.typography.bodyMedium)
+                        Text((if(auto.phase==io.github.ibudaoa.running.AutomaticRunPhase.PAUSED) "继续后预计还需 " else "预计剩余 ")+"%d分%02d秒".format(Locale.ROOT,remaining/60,remaining%60),style=MaterialTheme.typography.bodyMedium)
+                    if(auto.phase==io.github.ibudaoa.running.AutomaticRunPhase.INVALID)
+                        Text(state.automaticFailureReason?.takeIf { it.isNotBlank() }?.let { "本次记录未被判定有效：$it" } ?: "本次记录未被判定有效",
+                            style=MaterialTheme.typography.bodyMedium,color=colors.error)
+                    if(state.diagnosticMode) {
+                        Text(when(auto.phase) {
+                            io.github.ibudaoa.running.AutomaticRunPhase.STARTING -> "正在登记本次自动任务"
+                            io.github.ibudaoa.running.AutomaticRunPhase.RUNNING -> "自动执行中 · %.2f / %.2f km · 经过 %d/%d 点".format(Locale.ROOT,auto.meters/1000,auto.targetMeters/1000,auto.visitedPoints,auto.requiredPoints)
+                            io.github.ibudaoa.running.AutomaticRunPhase.PAUSED -> "自动执行已暂停 · 保留原路线和点位，暂停计入总用时"
+                            io.github.ibudaoa.running.AutomaticRunPhase.FINISHING -> "正在自动上传并提交本次记录"
+                            io.github.ibudaoa.running.AutomaticRunPhase.AWAITING_VERDICT -> "记录已创建，等待核对平台判定"
+                            io.github.ibudaoa.running.AutomaticRunPhase.VALID -> "平台已确认本次记录有效"
+                            io.github.ibudaoa.running.AutomaticRunPhase.INVALID -> "本次记录未被判定有效"
+                            io.github.ibudaoa.running.AutomaticRunPhase.INTERRUPTED -> "自动任务已中断，需核对原记录"
+                            else -> "自动执行准备未完成，请导出诊断"
+                        },style=MaterialTheme.typography.bodySmall)
+                        if(auto.phase!=io.github.ibudaoa.running.AutomaticRunPhase.INVALID)
+                            state.automaticFailureReason?.let { Text(it,style=MaterialTheme.typography.bodySmall) }
+                        if(auto.phase !in setOf(io.github.ibudaoa.running.AutomaticRunPhase.VALID,io.github.ibudaoa.running.AutomaticRunPhase.INVALID)) {
+                            auto.ruleProblems.sortedBy { it.ordinal }.forEach { Text(it.label,style=MaterialTheme.typography.bodySmall) }
+                            val issue=when {
+                                auto.problem?.startsWith("MATERIAL_")==true -> "提交材料未通过一致性检查，已保留原任务。"
+                                auto.problem=="PREPARATION_CHANGED" -> "运行准备已变化，原任务已保留，需先核对。"
+                                auto.problem=="REGISTRATION_TIME_MISMATCH" -> "手机与平台时间相差过大，已停止推进并保留原任务。"
+                                auto.problem in setOf("WRITE_RESULT_UNCERTAIN","ASSOCIATION_UNCERTAIN") -> "请求结果尚未确认，请先核对原任务。"
+                                auto.problem=="RECORD_MISMATCH" -> "返回记录与本次任务不匹配，尚未确认判定。"
+                                auto.problem=="RECORD_QUERY_FAILED" -> "暂未取得平台判定，请稍后核对。"
+                                else -> null
+                            }
+                            issue?.let { Text(it,style=MaterialTheme.typography.bodySmall) }
+                        }
+                    }
                     if(auto.phase==io.github.ibudaoa.running.AutomaticRunPhase.INTERRUPTED && auto.pendingWrite=="FINISH" && !auto.recordBound)
                         TextButton(onClick={confirmArchive=true},enabled=!state.busy) { Text("官方无记录，处理本地任务") }
-                    state.automaticFailureReason?.let { Text(it,style=MaterialTheme.typography.bodySmall) }
-                    if(auto.phase !in setOf(io.github.ibudaoa.running.AutomaticRunPhase.VALID,io.github.ibudaoa.running.AutomaticRunPhase.INVALID)) {
-                        auto.ruleProblems.sortedBy { it.ordinal }.forEach { Text(it.label,style=MaterialTheme.typography.bodySmall) }
-                        val issue=when {
-                            auto.problem?.startsWith("MATERIAL_")==true -> "提交材料未通过一致性检查，已保留原任务。"
-                            auto.problem=="PREPARATION_CHANGED" -> "运行准备已变化，原任务已保留，需先核对。"
-                            auto.problem=="REGISTRATION_TIME_MISMATCH" -> "手机与平台时间相差过大，已停止推进并保留原任务。"
-                            auto.problem in setOf("WRITE_RESULT_UNCERTAIN","ASSOCIATION_UNCERTAIN") -> "请求结果尚未确认，请先核对原任务。"
-                            auto.problem=="RECORD_MISMATCH" -> "返回记录与本次任务不匹配，尚未确认判定。"
-                            auto.problem=="RECORD_QUERY_FAILED" -> "暂未取得平台判定，请稍后核对。"
-                            else -> null
-                        }
-                        issue?.let { Text(it,style=MaterialTheme.typography.bodySmall) }
-                    }
-                    if(auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.RUNNING,io.github.ibudaoa.running.AutomaticRunPhase.PAUSED))
-                        TextButton(onClick={confirmAutomaticFinish=true},enabled=!state.busy) { Text("结束并提交本次记录") }
                 }
-                Button(onClick = if(auto.phase==io.github.ibudaoa.running.AutomaticRunPhase.FAILED && !auto.platformStarted)onPrepareRunningPlan else if(active || planned)onAutomaticAction else if(needsLogin || needsConfig)onWarmup else if(blocked || ready)onPrepareRunningPlan else onWarmup,
+                val verifying=auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.STARTING,
+                    io.github.ibudaoa.running.AutomaticRunPhase.FINISHING,io.github.ibudaoa.running.AutomaticRunPhase.AWAITING_VERDICT)
+                val finished=auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.VALID,io.github.ibudaoa.running.AutomaticRunPhase.INVALID)
+                if(auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.RUNNING,io.github.ibudaoa.running.AutomaticRunPhase.PAUSED)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Button(onClick = onAutomaticAction, modifier = Modifier.weight(1f).heightIn(min = 60.dp),
+                            shape = RoundedCornerShape(30.dp), enabled = !state.busy) {
+                            Text(if(auto.phase==io.github.ibudaoa.running.AutomaticRunPhase.RUNNING) "暂停" else "继续",
+                                style=MaterialTheme.typography.titleLarge)
+                        }
+                        OutlinedButton(onClick = onFinishAutomatic, modifier = Modifier.weight(1f).heightIn(min = 60.dp),
+                            shape = RoundedCornerShape(30.dp), enabled = !state.busy) {
+                            Text("结束", style=MaterialTheme.typography.titleLarge)
+                        }
+                    }
+                } else Button(onClick = when {
+                        finished -> onAutomaticComplete
+                        verifying -> ({})
+                        auto.phase==io.github.ibudaoa.running.AutomaticRunPhase.FAILED && !auto.platformStarted -> onPrepareRunningPlan
+                        active || planned -> onAutomaticAction
+                        needsLogin || needsConfig -> onWarmup
+                        blocked || ready -> onPrepareRunningPlan
+                        else -> onWarmup
+                    },
                     modifier = Modifier.fillMaxWidth().heightIn(min = 60.dp),shape = RoundedCornerShape(30.dp),
-                    enabled = !state.busy && auto.phase !in setOf(io.github.ibudaoa.running.AutomaticRunPhase.STARTING,io.github.ibudaoa.running.AutomaticRunPhase.FINISHING)) {
+                    enabled = !state.busy && !verifying) {
                     Text(when {
-                        auto.phase==io.github.ibudaoa.running.AutomaticRunPhase.RUNNING -> "暂停"
-                        auto.phase==io.github.ibudaoa.running.AutomaticRunPhase.PAUSED -> "继续"
-                        auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.VALID,io.github.ibudaoa.running.AutomaticRunPhase.INVALID) -> "准备下一次"
+                        finished -> "完成"
+                        verifying -> "核验中"
                         active -> "核对本次记录"
                         planned -> "开始自动运行"
                         needsLogin -> "重新登录"

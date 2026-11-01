@@ -180,6 +180,13 @@ internal class RunTaskLedger private constructor(private val journal:RunTaskJour
         check(canAbandonUnsent())
         journal.clear();closed=true
     }
+    /** Only a run that never entered the finish write may be dropped without keeping a record. */
+    @Synchronized fun canDiscardUnfinished():Boolean = !closed && !storageFailed && foreground && text("pending")==null &&
+        number("record")==null && summary.phase in setOf(RunTaskPhase.RUNNING,RunTaskPhase.PAUSED)
+    @Synchronized fun discardUnfinished() {
+        check(canDiscardUnfinished())
+        journal.clear();closed=true
+    }
     @Synchronized fun archiveResolved() {
         check(!closed && !storageFailed && foreground && text("pending")==null &&
             summary.phase in setOf(RunTaskPhase.VALID,RunTaskPhase.INVALID))

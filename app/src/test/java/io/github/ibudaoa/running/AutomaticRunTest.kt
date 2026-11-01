@@ -1,6 +1,7 @@
 package io.github.ibudaoa.running
 
 import io.github.ibudaoa.capture.*
+import io.github.ibudaoa.diagnostics.DiagnosticConfig
 import io.github.ibudaoa.diagnostics.PreparationExport
 import io.github.ibudaoa.domain.*
 import io.github.ibudaoa.roads.*
@@ -26,6 +27,10 @@ class AutomaticRunTest {
         listOf(ObservedRoadEdge("origin","21",listOf(p(-100.0),p(0.0)),100.0),ObservedRoadEdge("21","22",listOf(p(0.0),p(100.0)),100.0)),
         200.0,200.0,150.0,1000.0,includesReviewedOrigin=true,originAccessMeters=100.0)
     private fun timeline()=AutomaticRouteRun(route(),points,5.0,metric,200)
+    private fun permissiveConfig()=config.copy(config=JsonObject(config.config+mapOf("time_rule_arr" to JsonArray(listOf(buildJsonObject {
+        put("start_time",21600);put("end_time",79200);put("min_distance",0.1);put("max_distance",1)
+        put("max_pace",180);put("min_pace",540);put("min_log_num",2);put("point_num_online",2);put("point_num_offline",0)
+    })))))
     private class Journal:RunTaskJournal {
         var bytes:ByteArray?=null
         override fun load()=bytes?.clone()
@@ -35,7 +40,7 @@ class AutomaticRunTest {
     }
     private fun requirements()=RunRuntimeRequirements(RuntimeCheckShape.EMPTY_ARRAY,RuntimeCheckShape.EMPTY_ARRAY,true,true,
         RuntimeSwitch.DISABLED,RuntimeSwitch.DISABLED,RuntimeSwitch.DISABLED)
-    private inner class Harness(requirements:RunRuntimeRequirements=requirements()) {
+    private inner class Harness(requirements:RunRuntimeRequirements=requirements(), private val cfg:DiagnosticConfig=config) {
         var clock=1000L;var bound=true;var prepared=true;var fail:RunEndpoint?=null
         var during:(RunEndpoint)->Unit={}
         val requests=mutableListOf<RunEndpoint>();val fields=mutableListOf<Pair<RunEndpoint,Map<String,String>>>()
@@ -46,7 +51,7 @@ class AutomaticRunTest {
         val journal=Journal()
         val ledger=RunTaskLedger.create(journal,42,1,2,3,listOf("21","22"),generated=true,gyroRequired=true)
         val run=timeline()
-        val gateway=AutomaticRunGateway(RunProtocolFixture.session(),config,
+        val gateway=AutomaticRunGateway(RunProtocolFixture.session(),cfg,
             requirements,
             now={UploadFixture.now},connection={object:AccountReadConnection {
                 override fun send(request:LocalRequest):ByteArray {
@@ -371,6 +376,44 @@ class AutomaticRunTest {
         assertFalse(h.controller.finish());assertEquals("MATERIAL_TIME",h.controller.summary.problem)
         assertEquals(0,h.uploads);assertFalse(h.controller.summary.recordVerified)
         assertEquals(RunMaterialProblem.TIME,h.ledger.materialProblem())
+    }
+    @Test fun `ending before the rules are met exits without submitting or keeping a record`()=runBlocking {
+        val h=Harness(requirements(),permissiveConfig())
+        assertTrue(h.controller.start());h.clock+=5_000;h.controller.tick()
+        val review=h.controller.reviewFinish()
+        assertTrue(review is AutomaticFinishReview.Incomplete)
+        assertTrue((review as AutomaticFinishReview.Incomplete).problems.contains(RunCompletionProblem.DISTANCE))
+        val requests=h.requests.size
+        assertTrue(h.ledger.canDiscardUnfinished())
+        assertTrue(h.controller.discardUnfinished())
+        assertNull(h.journal.bytes)
+        assertEquals(requests,h.requests.size);assertEquals(0,h.uploads)
+        assertFalse(h.requests.any { it==RunEndpoint.FINISH || it==RunEndpoint.GYROSCOPE || it==RunEndpoint.RECORD })
+    }
+    @Test fun `pause induced pace failure exits instead of submitting an invalid record`()=runBlocking {
+        val h=Harness(requirements(),permissiveConfig())
+        assertTrue(h.controller.start());h.clock+=10_000;h.controller.tick()
+        h.controller.pause();h.clock+=120_000;assertTrue(h.controller.resume());h.clock+=30_000
+        h.controller.pause()
+        val review=h.controller.reviewFinish()
+        assertTrue(review is AutomaticFinishReview.Incomplete)
+        val problems=(review as AutomaticFinishReview.Incomplete).problems
+        assertTrue(RunCompletionProblem.PACE in problems)
+        assertFalse(RunCompletionProblem.DISTANCE in problems)
+        assertTrue(h.controller.discardUnfinished());assertNull(h.journal.bytes)
+        assertEquals(0,h.uploads);assertFalse(h.requests.any { it==RunEndpoint.FINISH })
+    }
+    @Test fun `ending with satisfied rules still submits and binds the record`()=runBlocking {
+        val h=Harness(requirements(),permissiveConfig())
+        assertTrue(h.controller.start());h.clock+=40_000;h.controller.pause()
+        assertEquals(AutomaticFinishReview.Allowed,h.controller.reviewFinish())
+        assertTrue(h.controller.finish())
+        assertEquals(AutomaticRunPhase.VALID,h.controller.summary.phase)
+        assertEquals(1,h.requests.count { it==RunEndpoint.FINISH })
+        assertEquals(1,h.requests.count { it==RunEndpoint.GYROSCOPE })
+        assertNotNull(h.journal.bytes)
+        assertFalse(h.ledger.canDiscardUnfinished());assertFalse(h.controller.discardUnfinished())
+        assertNotNull(h.journal.bytes)
     }
     @Test fun `failed location response cannot acknowledge points or trigger catch up writes`()=runBlocking {
         val h=Harness();assertTrue(h.controller.start());h.fail=RunEndpoint.LOCATION;h.clock+=20_000;h.controller.tick()

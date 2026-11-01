@@ -145,6 +145,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var accountResumeJob:Job?=null
     private var runPreparationJob:Job?=null
     private var automaticJob:Job?=null
+    private var automaticVerificationJob:Job?=null
     private var automaticController:AutomaticRunController?=null
     private val automaticJournal=AndroidRunTaskJournal(application)
     private var automaticJournalPending=false
@@ -521,7 +522,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 while(controller.summary.phase in setOf(AutomaticRunPhase.RUNNING,AutomaticRunPhase.PAUSED,AutomaticRunPhase.FINISHING)) {
                     controller.tick();publishAutomatic();delay(500)
                 }
-                releaseAutomaticIfResolved()
+                releaseAutomaticIfResolved();ensureAutomaticVerification()
             } catch(e:CancellationException) { throw e }
             catch(_:Exception) {
                 runCatching { automaticController?.interrupt() };publishAutomatic()
@@ -563,14 +564,90 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         automaticJob=viewModelScope.launch {
             previous?.cancel();previous?.join()
             mutableState.update { it.copy(busy=true) }
-            try { controller.finish();publishAutomatic();releaseAutomaticIfResolved() }
+            try {
+                when(val review=controller.reviewFinish()) {
+                    is AutomaticFinishReview.Incomplete -> discardIncompleteAutomatic(controller,review.problems)
+                    else -> { controller.finish();publishAutomatic();releaseAutomaticIfResolved() }
+                }
+            }
             catch(e:CancellationException) { throw e }
             catch(_:Exception) { runCatching { controller.interrupt() };publishAutomatic();showMessage("结束结果尚未确认，请核对记录。") }
-            finally { mutableState.update { it.copy(busy=false) };if(automaticJob===currentCoroutineContext()[Job])automaticJob=null }
+            finally {
+                mutableState.update { it.copy(busy=false) }
+                if(automaticJob===currentCoroutineContext()[Job])automaticJob=null
+                ensureAutomaticVerification()
+            }
         }
     }
+    private suspend fun discardIncompleteAutomatic(controller:AutomaticRunController,problems:Set<RunCompletionProblem>) {
+        withContext(NonCancellable) {
+            val released=runCatching {
+                store.pointPlanningStorage.first().cache?.takeIf { it.locked }?.let { store.releaseResolvedPointCache(it) }
+                true
+            }.getOrDefault(false)
+            val discarded=released && runCatching { controller.discardUnfinished() }.getOrDefault(false)
+            if(discarded) {
+                automaticJournalPending=false;automaticController=null
+                preparedRunningPlan=null;runGrant=null
+                mutableState.update { it.copy(automaticRun=AutomaticRunSummary(),automaticFailureReason=null,
+                    automaticRoute=null,automaticPosition=null,session=SessionState(),
+                    runningPlanSummary=RunningPlanSummary(),localPreview=null,previewPoints=null,previewSummary=null,
+                    routeResult=null) }
+                val details=if(state.value.diagnosticMode) "："+problems.sortedBy { it.ordinal }.joinToString("、") { it.label } else ""
+                showMessage("本次未达到有效条件，已退出，未提交记录$details。")
+            } else {
+                runCatching { controller.interrupt() };publishAutomatic()
+                showMessage("本次未能退出，请导出诊断。")
+            }
+        }
+    }
+    /** Polls an already submitted record until the platform verdict arrives, without user action. */
+    private fun ensureAutomaticVerification() {
+        val controller=automaticController ?: return
+        val summary=controller.summary
+        if(!summary.recordBound || summary.phase in setOf(AutomaticRunPhase.VALID,AutomaticRunPhase.INVALID))return
+        if(summary.phase !in setOf(AutomaticRunPhase.AWAITING_VERDICT,AutomaticRunPhase.INTERRUPTED))return
+        if(automaticVerificationJob?.isActive==true)return
+        automaticVerificationJob=viewModelScope.launch {
+            try {
+                var next=SystemClock.elapsedRealtime()+10_000
+                while(true) {
+                    val current=controller.summary
+                    if(current.phase in setOf(AutomaticRunPhase.VALID,AutomaticRunPhase.INVALID))break
+                    if(!current.recordBound || current.phase !in setOf(AutomaticRunPhase.AWAITING_VERDICT,AutomaticRunPhase.INTERRUPTED))break
+                    if(current.phase==AutomaticRunPhase.AWAITING_VERDICT && accountForeground &&
+                        SystemClock.elapsedRealtime()>=next) {
+                        controller.query();publishAutomatic();releaseAutomaticIfResolved()
+                        next=SystemClock.elapsedRealtime()+30_000
+                    }
+                    delay(1_000)
+                }
+            } finally {
+                if(automaticVerificationJob===currentCoroutineContext()[Job])automaticVerificationJob=null
+            }
+        }
+    }
+    /** Leaves the resolved run and returns to the page before any plan was generated. */
+    fun completeAutomatic() {
+        val summary=state.value.automaticRun
+        if(summary.phase !in setOf(AutomaticRunPhase.VALID,AutomaticRunPhase.INVALID))return
+        if(state.value.busy)return
+        if(automaticJournalPending) { showMessage("本次记录尚未完成本地整理，请稍后重试。");return }
+        automaticVerificationJob?.cancel();automaticVerificationJob=null
+        automaticController=null
+        preparedRunningPlan=null;runGrant=null
+        mutableState.update { it.copy(automaticRun=AutomaticRunSummary(),automaticFailureReason=null,
+            automaticRoute=null,automaticPosition=null,session=SessionState(),
+            runningPlanSummary=RunningPlanSummary(),localPreview=null,previewPoints=null,previewSummary=null,
+            routeResult=null) }
+    }
     fun onAutomaticForegroundReturned() {
-        if(automaticController!=null || automaticJournalPending)AccountSessionRuntime.session.onForeground()
+        val controller=automaticController
+        if(controller!=null || automaticJournalPending)AccountSessionRuntime.session.onForeground()
+        if(controller!=null && controller.summary.recordBound &&
+            controller.summary.phase in setOf(AutomaticRunPhase.AWAITING_VERDICT,AutomaticRunPhase.INTERRUPTED)) {
+            controller.returned();publishAutomatic();ensureAutomaticVerification()
+        }
     }
     fun interruptAutomatic() {
         val controller=automaticController
