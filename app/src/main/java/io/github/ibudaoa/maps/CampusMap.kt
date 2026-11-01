@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.SystemClock
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -29,6 +30,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.amap.api.maps.AMap
 import com.amap.api.maps.CameraUpdateFactory
 import com.amap.api.maps.MapsInitializer
 import com.amap.api.maps.TextureMapView
@@ -38,6 +40,7 @@ import com.amap.api.maps.model.CircleOptions
 import com.amap.api.maps.model.LatLngBounds
 import com.amap.api.maps.model.Marker
 import com.amap.api.maps.model.MarkerOptions
+import com.amap.api.maps.model.Polygon
 import com.amap.api.maps.model.PolygonOptions
 import com.amap.api.maps.model.Polyline
 import com.amap.api.maps.model.PolylineOptions
@@ -60,6 +63,7 @@ fun CampusMap(config: DiagnosticConfig?, consent: Boolean, active: Boolean, road
     if (!BuildConfig.MAP_KEY_CONFIGURED || !consent || config == null) return
     val location=LocalForegroundLocation.current
     val context = LocalContext.current
+    val darkTheme = isSystemInDarkTheme()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var attempt by remember { mutableIntStateOf(0) }
     var loaded by remember(config, attempt) { mutableStateOf(false) }
@@ -72,7 +76,7 @@ fun CampusMap(config: DiagnosticConfig?, consent: Boolean, active: Boolean, road
         else try {
             MapsInitializer.updatePrivacyShow(context, true, true)
             MapsInitializer.updatePrivacyAgree(context, true)
-            MapHost(context, config)
+            MapHost(context, config, darkTheme)
         } catch (_: Exception) { null } catch (_: LinkageError) { null }
     }
     LaunchedEffect(host) {
@@ -100,7 +104,10 @@ fun CampusMap(config: DiagnosticConfig?, consent: Boolean, active: Boolean, road
         host?.showFix(location.fix.takeIf { active && !automaticDisplay })
     }
     Box(modifier.fillMaxSize()) {
-        if (host != null) AndroidView(factory = { host.view }, update = { host.showRoadEvidence(roadEvidence); host.showRouteDraft(routeDraft); host.showReviewGap(reviewGap); host.showReviewRoad(reviewRoad); host.showOriginProposal(originProposal); host.showSelected(selectedIds); host.showAutomatic(automaticPosition) }, modifier = Modifier.fillMaxSize())
+        if (host != null) AndroidView(factory = { host.view }, update = {
+            host.setNightMode(darkTheme)
+            host.showRoadEvidence(roadEvidence); host.showRouteDraft(routeDraft); host.showReviewGap(reviewGap); host.showReviewRoad(reviewRoad); host.showOriginProposal(originProposal); host.showSelected(selectedIds); host.showAutomatic(automaticPosition)
+        }, modifier = Modifier.fillMaxSize())
         // Normal mode keeps the map free of left-bottom hints; debug mode restores the full panel for diagnosis.
         if (showDiagnostics) {
             Column(Modifier.align(Alignment.BottomStart).padding(start = 16.dp, bottom = 175.dp)) {
@@ -135,8 +142,41 @@ fun CampusMap(config: DiagnosticConfig?, consent: Boolean, active: Boolean, road
     }
 }
 
-private class MapHost(context: Context, config: DiagnosticConfig) {
+private data class MapPalette(
+    val boundaryStroke: Int,
+    val boundaryFill: Int,
+    val road: Int,
+    val route: Int,
+    val accent: Int,
+    val fixStroke: Int,
+    val fixFill: Int,
+)
+
+private val LightMapPalette = MapPalette(
+    boundaryStroke = Color.rgb(71, 113, 84),
+    boundaryFill = Color.argb(12, 71, 113, 84),
+    road = Color.rgb(47, 121, 76),
+    route = Color.rgb(15, 84, 49),
+    accent = Color.rgb(234, 102, 20),
+    fixStroke = Color.BLUE,
+    fixFill = Color.argb(25, 0, 90, 220),
+)
+
+private val DarkMapPalette = MapPalette(
+    boundaryStroke = Color.rgb(143, 201, 166),
+    boundaryFill = Color.argb(26, 143, 201, 166),
+    road = Color.rgb(111, 191, 147),
+    route = Color.rgb(158, 227, 182),
+    accent = Color.rgb(255, 154, 77),
+    fixStroke = Color.rgb(111, 180, 255),
+    fixFill = Color.argb(40, 52, 140, 255),
+)
+
+private class MapHost(context: Context, config: DiagnosticConfig, initiallyDark: Boolean = false) {
     val view = TextureMapView(context)
+    private var night = initiallyDark
+    private val palette: MapPalette get() = if (night) DarkMapPalette else LightMapPalette
+    private var boundaryPolygon: Polygon? = null
     private var resumed = false
     private var destroyed = false
     private var position: Marker? = null
@@ -163,14 +203,15 @@ private class MapHost(context: Context, config: DiagnosticConfig) {
         try {
             view.onCreate(null)
             val map = view.map
+            map.setMapType(if (night) AMap.MAP_TYPE_NIGHT else AMap.MAP_TYPE_NORMAL)
             map.uiSettings.isZoomControlsEnabled = false
             map.uiSettings.isMyLocationButtonEnabled = false
             map.isMyLocationEnabled = false // SDK automatic location is deliberately disabled.
             val review = ConfigurationReviewer.review(config)
             val coordinates = review.candidates.orEmpty().map { it.coordinate } + review.allowedBoundary.orEmpty()
             review.allowedBoundary?.let { boundary ->
-                map.addPolygon(PolygonOptions().addAll(boundary.map { it.latLng() })
-                    .strokeWidth(3f).strokeColor(Color.rgb(71, 113, 84)).fillColor(Color.argb(12, 71, 113, 84)))
+                boundaryPolygon = map.addPolygon(PolygonOptions().addAll(boundary.map { it.latLng() })
+                    .strokeWidth(3f).strokeColor(palette.boundaryStroke).fillColor(palette.boundaryFill))
             }
             review.candidates.orEmpty().forEach { point ->
                 candidates[point.id] = point.coordinate
@@ -186,6 +227,20 @@ private class MapHost(context: Context, config: DiagnosticConfig) {
         } catch (e: Exception) { destroy(); throw e } catch (e: LinkageError) { destroy(); throw e }
     }
 
+    fun setNightMode(value: Boolean) {
+        if (destroyed || night == value) return
+        night = value
+        runCatching { view.map.setMapType(if (night) AMap.MAP_TYPE_NIGHT else AMap.MAP_TYPE_NORMAL) }
+        boundaryPolygon?.strokeColor = palette.boundaryStroke
+        boundaryPolygon?.fillColor = palette.boundaryFill
+        roads.forEach { it.color = palette.road }
+        routeLines.forEach { it.color = palette.route }
+        gapLine?.color = palette.accent
+        reviewRoadLine?.color = palette.accent
+        originLine?.color = palette.accent
+        accuracy?.strokeColor = palette.fixStroke
+        accuracy?.fillColor = palette.fixFill
+    }
     fun resume() { if (!destroyed && !resumed) { view.onResume(); resumed = true } }
     fun pause() { if (!destroyed && resumed) { view.onPause(); resumed = false } }
     fun destroy() {
@@ -202,7 +257,7 @@ private class MapHost(context: Context, config: DiagnosticConfig) {
         evidence?.legs?.forEach { record -> record.leg.steps.forEach { step ->
             if (step.size >= 2 && roads.size < 1000 && pointCount + step.size <= 10_000) {
                 roads.add(view.map.addPolyline(PolylineOptions().addAll(step.map { it.latLng() })
-                    .color(Color.rgb(47, 121, 76)).width(5f)))
+                    .color(palette.road).width(5f)))
                 pointCount += step.size
             }
         } }
@@ -213,7 +268,7 @@ private class MapHost(context: Context, config: DiagnosticConfig) {
         shownRoute = route
         route?.legs?.forEach { leg ->
             if (leg.points.size >= 2) routeLines.add(view.map.addPolyline(PolylineOptions().addAll(leg.points.map { it.latLng() })
-                .color(Color.rgb(15, 84, 49)).width(10f)))
+                .color(palette.route).width(10f)))
         }
         view.post { fitRoute() }
     }
@@ -248,7 +303,7 @@ private class MapHost(context: Context, config: DiagnosticConfig) {
         gapMarkers.add(view.map.addMarker(MarkerOptions().position(gap.to.latLng()).title("缺口终点")
             .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE))))
         gapLine = view.map.addPolyline(PolylineOptions().add(gap.from.latLng(), gap.to.latLng())
-            .color(Color.rgb(234, 102, 20)).width(12f))
+            .color(palette.accent).width(12f))
         val middle = com.amap.api.maps.model.LatLng((gap.from.latitude + gap.to.latitude) / 2,
             (gap.from.longitude + gap.to.longitude) / 2)
         view.map.moveCamera(CameraUpdateFactory.newLatLngZoom(middle, 20f))
@@ -260,7 +315,7 @@ private class MapHost(context: Context, config: DiagnosticConfig) {
         reviewRoadLine?.remove(); reviewRoadLine = null
         if (road == null || road.points.size < 2) return
         reviewRoadLine = view.map.addPolyline(PolylineOptions().addAll(road.points.map { it.latLng() })
-            .color(Color.rgb(234, 102, 20)).width(10f))
+            .color(palette.accent).width(10f))
         val bounds = LatLngBounds.builder().apply { road.points.forEach { include(it.latLng()) } }.build()
         runCatching { view.map.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds, 700, 700, 120)) }
     }
@@ -283,7 +338,7 @@ private class MapHost(context: Context, config: DiagnosticConfig) {
         originMarkers.forEach { it.remove() }; originMarkers.clear()
         if (proposal == null) return
         originLine = view.map.addPolyline(PolylineOptions().addAll(proposal.approach.map { it.latLng() })
-            .color(Color.rgb(234,102,20)).width(10f))
+            .color(palette.accent).width(10f))
         originMarkers.add(view.map.addMarker(MarkerOptions().position(proposal.origin.latLng()).title("待核对的定位起点")
             .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED))))
         originMarkers.add(view.map.addMarker(MarkerOptions().position(proposal.roadPoint.latLng()).title("拟接入道路")
@@ -300,6 +355,6 @@ private class MapHost(context: Context, config: DiagnosticConfig) {
         position = view.map.addMarker(MarkerOptions().position(fix.coordinate.latLng()).title("当前位置")
             .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE)))
         accuracy = view.map.addCircle(CircleOptions().center(fix.coordinate.latLng()).radius(fix.accuracyMeters.toDouble())
-            .strokeWidth(1f).strokeColor(Color.BLUE).fillColor(Color.argb(25, 0, 90, 220)))
+            .strokeWidth(1f).strokeColor(palette.fixStroke).fillColor(palette.fixFill))
     }
 }
