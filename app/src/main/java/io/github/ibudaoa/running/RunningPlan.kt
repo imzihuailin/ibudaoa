@@ -12,20 +12,17 @@ import kotlin.math.max
 /** A plan is not a platform task, uploaded trajectory or valid record. */
 enum class RunningPlanPhase { IDLE, CHECKING, SYNCING, WAITING_LOCATION, CONNECTING_ROUTE, REVIEW_ORIGIN, PLANNED, BLOCKED, INTERRUPTED }
 enum class RunningPlanProblem(val label:String) {
-    ACCOUNT("登录或在线核对尚未完成"), ONLINE_EXPIRED("本次跑前核验已失效，请重新生成计划"),
-    CONFIGURATION_CHANGED("学校、跑区或道路配置已变化，原有数据已保留"),
-    SCHOOL_RULES("当前学校规则分支尚未适配"), TERM("当前不在学期范围内"),
-    WEEK("今天不符合星期规则，或星期配置未知"), DATE_RULE("当前日期规则尚未完整适配"),
-    TIME("当前不在允许的跑步时段"), PLATFORM_RESTRICTION("平台提示当前不符合跑前条件"),
-    FACE("当前核验要求尚未适配"), LOCATION("请等待新鲜准确的前台定位"),
-    SYNC_INCOMPLETE("最新规则与本地道路同步未完成，请重新生成计划"),
-    ROAD_REVIEW("当前道路连接确认缺失，请核对并保存道路连接及往返"),
-    ROADS("当前道路尚未就绪"), ROAD_UNREACHABLE("当前点位之间没有可用道路路线"), ROAD_DISTANCE("当前道路无法满足距离要求"), ROAD_CALCULATION("道路路线计算未完成"), ORIGIN("请先核对当前位置到道路的连接"),
-    PACE_MARGIN("配速区间不足以留出必要余量"), TIME_REMAINING("当前时段剩余时间不足以完成计划"),
-    CANCELLED("已离开前台或取消，计划已失效"),
-    TASK_STATE("已有未核对的运动状态，请先核对平台记录"),
-    ACCESS_ROUTE("地图尚未返回可用的步行接入建议，请稍后重试"),
-    POINT_SELECTION("当前位置暂未满足学校的选点条件"),
+    ACCOUNT("未连接账号，请重新登录"), ONLINE_EXPIRED("登录状态已变化，请重试"),
+    CONFIGURATION_CHANGED("学校配置有更新，请重新同步学校"),
+    SCHOOL_RULES("当前学校规则暂不支持"), TERM("当前不在学期内"),
+    WEEK("今天不是可跑日"), DATE_RULE("当前日期规则暂不支持"),
+    TIME("当前不在跑步时段"), PLATFORM_RESTRICTION("平台当前不允许跑步"),
+    FACE("需要人脸核验，当前版本不支持"), LOCATION("等待定位"),
+    SYNC_INCOMPLETE("同步超时，请重新生成计划"),
+    PLAN_FAILED("自动生成计划失败，请重新生成计划"),
+    CANCELLED("已离开软件，计划已失效，请重新生成计划"),
+    TASK_STATE("上次运行未核对完，请先核对记录"),
+    POINT_SELECTION("当前位置不能选点，请移动后重试"),
 }
 data class RunningPlanSummary(val phase:RunningPlanPhase=RunningPlanPhase.IDLE,val problem:RunningPlanProblem?=null,
     val distanceMeters:Int?=null,val paceSecondsPerKm:Int?=null,val durationSeconds:Int?=null,val pointCount:Int?=null,
@@ -59,19 +56,19 @@ object RunningPlanRules {
         val expectedScope=runCatching { io.github.ibudaoa.roads.CandidateRoadRequest.create(config,route.scope.connectionEpoch,candidates[0].id,candidates[1].id).scope }.getOrNull()
         if(route.scope!=expectedScope || !route.includesReviewedOrigin || route.legs.isEmpty() ||
             route.selectedIds.size!=rule.requiredCheckIns || route.selectedIds.distinct().size!=route.selectedIds.size ||
-            route.visitedOrder.toSet()!=route.selectedIds.toSet()) return blocked(RunningPlanProblem.ROADS)
+            route.visitedOrder.toSet()!=route.selectedIds.toSet()) return blocked(RunningPlanProblem.PLAN_FAILED)
         if(!route.lowerDistanceMeters.isFinite() || !route.upperDistanceMeters.isFinite() || route.lowerDistanceMeters<=0 || route.upperDistanceMeters<route.lowerDistanceMeters)
-            return blocked(RunningPlanProblem.ROADS)
-        if(route.lowerDistanceMeters<rule.minimumKm*1000 || route.upperDistanceMeters>rule.maximumKm*1000) return blocked(RunningPlanProblem.ROADS)
+            return blocked(RunningPlanProblem.PLAN_FAILED)
+        if(route.lowerDistanceMeters<rule.minimumKm*1000 || route.upperDistanceMeters>rule.maximumKm*1000) return blocked(RunningPlanProblem.PLAN_FAILED)
         val width=rule.slowestSecondsPerKm-rule.fastestSecondsPerKm
-        if(width<4) return blocked(RunningPlanProblem.PACE_MARGIN)
+        if(width<4) return blocked(RunningPlanProblem.PLAN_FAILED)
         val pace=rule.fastestSecondsPerKm+max(1,ceil(width*0.05).toInt())
         val earliest=ceil(route.upperDistanceMeters*(rule.fastestSecondsPerKm+1)/1000).toInt()
         val latest=floor(route.lowerDistanceMeters*(rule.slowestSecondsPerKm-1)/1000).toInt()
-        if(earliest>latest) return blocked(RunningPlanProblem.PACE_MARGIN)
+        if(earliest>latest) return blocked(RunningPlanProblem.PLAN_FAILED)
         val duration=ceil(route.upperDistanceMeters*pace/1000).toInt().coerceIn(earliest,latest)
         val broadEnd=(config.config["run_end_time"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() ?: return blocked(RunningPlanProblem.TIME)
-        if(duration+15>minOf(rule.endSecond,broadEnd)-second) return blocked(RunningPlanProblem.TIME_REMAINING)
+        if(duration+15>minOf(rule.endSecond,broadEnd)-second) return blocked(RunningPlanProblem.PLAN_FAILED)
         val plan=RunningPlan(route,pace,duration,rule,now.atZone(zone).toLocalDate())
         return plan to RunningPlanSummary(RunningPlanPhase.PLANNED,null,ceil(route.upperDistanceMeters).toInt(),pace,duration,route.selectedIds.size,
             ceil(route.originAccessMeters).toInt())

@@ -625,16 +625,14 @@ internal fun MapPage(
                     Spacer(Modifier.height(14.dp))
                 }
                 if(runningPage && state.runningPlanSummary.phase!=io.github.ibudaoa.running.RunningPlanPhase.IDLE) {
-                    Text(state.runningPlanSummary.problem?.label ?: when(state.runningPlanSummary.phase) {
-                        io.github.ibudaoa.running.RunningPlanPhase.CHECKING -> "正在读取最新跑前条件"
-                        io.github.ibudaoa.running.RunningPlanPhase.SYNCING -> "正在同步规则并保留已确认道路"
-                        io.github.ibudaoa.running.RunningPlanPhase.WAITING_LOCATION -> "等待新鲜准确的前台定位"
-                        io.github.ibudaoa.running.RunningPlanPhase.CONNECTING_ROUTE -> "正在规划当前位置到参考路线的接入路段"
-                        io.github.ibudaoa.running.RunningPlanPhase.PLANNED -> "本次计划 · 预计${((state.runningPlanSummary.durationSeconds ?: 0)+59)/60}分钟"
-                        else -> "计划尚未就绪"
-                    })
-                    if (state.diagnosticMode && state.runningPlanSummary.problem == io.github.ibudaoa.running.RunningPlanProblem.ROAD_REVIEW)
-                        TextButton(onClick = onReviewRoadGaps, enabled = !state.busy) { Text("核对已有道路连接") }
+                    (state.runningPlanSummary.problem?.label ?: when(state.runningPlanSummary.phase) {
+                        io.github.ibudaoa.running.RunningPlanPhase.CHECKING -> "正在读取跑前条件"
+                        io.github.ibudaoa.running.RunningPlanPhase.SYNCING -> "正在同步规则"
+                        io.github.ibudaoa.running.RunningPlanPhase.WAITING_LOCATION -> "等待定位"
+                        io.github.ibudaoa.running.RunningPlanPhase.CONNECTING_ROUTE -> "正在规划路线"
+                        io.github.ibudaoa.running.RunningPlanPhase.PLANNED -> "本次计划 · 约${((state.runningPlanSummary.durationSeconds ?: 0)+59)/60}分钟"
+                        else -> null
+                    })?.let { Text(it) }
                 }
                 if (!runningPage) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Box(Modifier.size(9.dp).background(colors.onSurfaceVariant, CircleShape))
@@ -662,6 +660,12 @@ internal fun MapPage(
                 val planned=state.runningPlanSummary.phase==io.github.ibudaoa.running.RunningPlanPhase.PLANNED
                 val auto=state.automaticRun
                 val active=auto.phase!=io.github.ibudaoa.running.AutomaticRunPhase.IDLE
+                val blocked=state.runningPlanSummary.phase==io.github.ibudaoa.running.RunningPlanPhase.BLOCKED
+                val blockedProblem=state.runningPlanSummary.problem.takeIf { blocked }
+                val needsLogin=blockedProblem in setOf(io.github.ibudaoa.running.RunningPlanProblem.ACCOUNT,io.github.ibudaoa.running.RunningPlanProblem.ONLINE_EXPIRED)
+                val needsConfig=blockedProblem==io.github.ibudaoa.running.RunningPlanProblem.CONFIGURATION_CHANGED
+                val waitingLocation=blockedProblem==io.github.ibudaoa.running.RunningPlanProblem.LOCATION
+                val locating=state.runningPlanSummary.phase==io.github.ibudaoa.running.RunningPlanPhase.WAITING_LOCATION
                 if(active) {
                     LinearProgressIndicator(progress={auto.progressFraction},modifier=Modifier.fillMaxWidth().padding(vertical=8.dp))
                     val remaining=auto.remainingSeconds
@@ -698,7 +702,7 @@ internal fun MapPage(
                     if(auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.RUNNING,io.github.ibudaoa.running.AutomaticRunPhase.PAUSED))
                         TextButton(onClick={confirmAutomaticFinish=true},enabled=!state.busy) { Text("结束并提交本次记录") }
                 }
-                Button(onClick = if(auto.phase==io.github.ibudaoa.running.AutomaticRunPhase.FAILED && !auto.platformStarted)onPrepareRunningPlan else if(active || planned)onAutomaticAction else if(ready)onPrepareRunningPlan else onWarmup,
+                Button(onClick = if(auto.phase==io.github.ibudaoa.running.AutomaticRunPhase.FAILED && !auto.platformStarted)onPrepareRunningPlan else if(active || planned)onAutomaticAction else if(needsLogin || needsConfig)onWarmup else if(blocked || ready)onPrepareRunningPlan else onWarmup,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 60.dp),shape = RoundedCornerShape(30.dp),
                     enabled = !state.busy && auto.phase !in setOf(io.github.ibudaoa.running.AutomaticRunPhase.STARTING,io.github.ibudaoa.running.AutomaticRunPhase.FINISHING)) {
                     Text(when {
@@ -707,6 +711,11 @@ internal fun MapPage(
                         auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.VALID,io.github.ibudaoa.running.AutomaticRunPhase.INVALID) -> "准备下一次"
                         active -> "核对本次记录"
                         planned -> "开始自动运行"
+                        needsLogin -> "重新登录"
+                        needsConfig -> "更新学校配置"
+                        waitingLocation -> "重新获取定位"
+                        blocked -> "重新生成计划"
+                        locating -> "等待定位"
                         ready -> "生成运行计划"
                         else -> "完成准备"
                     },style=MaterialTheme.typography.titleLarge)

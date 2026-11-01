@@ -74,7 +74,7 @@ class RunningPlanTest {
     @Test fun `term and closing time do not permit an impossible finishing schedule`() {
         assertEquals(RunningPlanProblem.TERM,RunningPlanRules.problem(config,Instant.parse("2027-03-01T00:20:00Z"),zone))
         val late=Instant.parse("2026-10-28T13:59:55Z")
-        assertEquals(RunningPlanProblem.TIME_REMAINING,RunningPlanRules.create(config,draft(),late,zone).second.problem)
+        assertEquals(RunningPlanProblem.PLAN_FAILED,RunningPlanRules.create(config,draft(),late,zone).second.problem)
     }
     @Test fun `changed rule pace is derived anew rather than fixed to three minutes`() {
         val rule=config.config.getValue("time_rule_arr").jsonArray.single().jsonObject
@@ -85,7 +85,7 @@ class RunningPlanTest {
     @Test fun `unreviewed incomplete or wrong scope routes cannot be promoted to a plan`() {
         val route=draft()
         for(bad in listOf(route.copy(includesReviewedOrigin=false),route.copy(legs=emptyList()),route.copy(selectedIds=listOf("p0")),route.copy(scope=route.scope.copy(zoneId=999))))
-            assertEquals(RunningPlanProblem.ROADS,RunningPlanRules.create(config,bad,now,zone).second.problem)
+            assertEquals(RunningPlanProblem.PLAN_FAILED,RunningPlanRules.create(config,bad,now,zone).second.problem)
     }
     @Test fun `online rule and counter changes preserve geometry but new zone point table or checks do not`() {
         assertTrue(OnlineConfigurationCompatibility.compatible(config,changed("run_log_num",JsonPrimitive(2))))
@@ -117,7 +117,7 @@ class RunningPlanTest {
     @Test fun `start recheck refuses closing time and next day without changing the prepared route`() {
         val plan=RunningPlanRules.create(config,draft(),now,zone).first!!
         assertNull(RunningPlanRules.recheck(config,plan,now.plusSeconds(10),zone))
-        assertEquals(RunningPlanProblem.TIME_REMAINING,RunningPlanRules.recheck(config,plan,Instant.parse("2026-10-28T13:59:55Z"),zone))
+        assertEquals(RunningPlanProblem.PLAN_FAILED,RunningPlanRules.recheck(config,plan,Instant.parse("2026-10-28T13:59:55Z"),zone))
         assertNotNull(RunningPlanRules.recheck(config,plan,now.plusSeconds(86400),zone))
     }
     @Test fun `start recheck rejects changed pace even when the route still meets distance limits`() {
