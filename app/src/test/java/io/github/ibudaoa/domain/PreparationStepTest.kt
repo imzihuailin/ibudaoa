@@ -21,7 +21,7 @@ class PreparationStepTest {
     }
     @Test fun `fresh capture requires key and actual consent before road checking`() {
         assertEquals(PreparationStep.MAP_UNAVAILABLE, next(key = false))
-        assertEquals(PreparationStep.MAP_CONSENT, next(consent = false))
+        assertEquals(PreparationStep.ENABLE_LOCATION, next(consent = false))
         assertEquals(PreparationStep.CHECK_ROADS, next())
     }
     @Test fun `running never duplicates requests and interrupted only retries on user continue`() {
@@ -45,8 +45,22 @@ class PreparationStepTest {
             true, true, RoadBatchPhase.COMPLETE, false, roadsReady = true))
         assertEquals(PreparationStep.WAIT, PreparationStepResolver.next(true, 1, 1, false,
             true, true, RoadBatchPhase.COMPLETE, true, roadsReady = true))
-        assertEquals(PreparationStep.MAP_CONSENT, PreparationStepResolver.next(true, 1, 1, false,
+        assertEquals(PreparationStep.ENABLE_LOCATION, PreparationStepResolver.next(true, 1, 1, false,
             true, false, RoadBatchPhase.COMPLETE, false, roadsReady = true))
+    }
+
+    @Test fun `missing precise location blocks even when roads are already saved`() {
+        assertEquals(PreparationStep.ENABLE_LOCATION, PreparationStepResolver.next(true, 1, 1, false,
+            true, true, RoadBatchPhase.COMPLETE, false, roadsReady = true, locationGranted = false))
+    }
+
+    @Test fun `restoring location reuses saved roads while first setup still checks roads`() {
+        assertEquals(PreparationStep.READY, PreparationStepResolver.next(true, 1, 1, false,
+            true, true, RoadBatchPhase.COMPLETE, false, roadsReady = true, locationGranted = true))
+        assertEquals(PreparationStep.CHECK_ROADS, PreparationStepResolver.next(true, 1, 1, false,
+            true, true, null, false, locationGranted = true))
+        assertEquals(PreparationStep.COLLECT_CONFIG, PreparationStepResolver.next(false, 1, 1, false,
+            true, false, null, false, locationGranted = false))
     }
 
 }

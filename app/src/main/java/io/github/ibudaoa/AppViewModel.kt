@@ -73,6 +73,9 @@ data class AppState(
     val accountSession:AccountSessionSnapshot=AccountSessionSnapshot(),
     val runningPlanSummary:RunningPlanSummary=RunningPlanSummary(),
     val mapConsent: Boolean = false,
+    val locationGranted: Boolean = false,
+    val locationCheckCycle: Int = 0,
+    val locationStartupPending: Boolean = true,
     val connectionEpoch: Long = 0,
     val captureRevision: Int = 0,
     val capturedAtEpochSecond: Long = 0,
@@ -292,6 +295,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         showMessage(problem.label)
     }
     fun prepareRunningPlan(lifecycle:Lifecycle) {
+        if (!hasPreciseLocation()) return showMessage("未获得定位权限")
         if(!automaticJournalChecked)return showMessage("正在恢复本地任务状态，请稍后继续。")
         if(automaticTaskOpen())return showMessage("请先核对当前自动任务的结果。")
         automaticController=null
@@ -719,6 +723,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         store.acknowledgePreparation()
     }
 
+    private fun hasPreciseLocation(): Boolean = getApplication<Application>().checkSelfPermission(
+        android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+    fun onLocationStartup() {
+        mutableState.update { it.copy(locationCheckCycle = it.locationCheckCycle + 1, locationStartupPending = true) }
+        refreshLocationPermission()
+    }
+
+    fun acknowledgeLocationStartup() {
+        mutableState.update { it.copy(locationStartupPending = false) }
+    }
+
+    fun refreshLocationPermission() {
+        val granted = hasPreciseLocation()
+        mutableState.update { it.copy(locationGranted = granted) }
+    }
+
     fun setMapConsent(agreed: Boolean) = operation("地图授权状态未能保存，请重试。") {
         store.setMapConsent(agreed)
     }
@@ -879,7 +900,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         val config = snapshot.config ?: return
-        if (!snapshot.mapConsent || !BuildConfig.MAP_KEY_CONFIGURED || snapshot.capture.active) return
+        if (!hasPreciseLocation() || !snapshot.mapConsent || !BuildConfig.MAP_KEY_CONFIGURED || snapshot.capture.active) return
         val plan = runCatching { RoadBatchPlan.create(config, snapshot.connectionEpoch) }.getOrNull()
             ?: return mutableState.update { it.copy(preparationError = "当前学校配置暂时无法核对道路，请重试。") }
         CaptureVpnService.stopOwned(getApplication())

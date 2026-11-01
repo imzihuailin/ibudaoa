@@ -9,6 +9,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -34,6 +37,61 @@ class MainActivity : ComponentActivity() {
     private val exportConnectionReport = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         uri?.let(model::exportConnectionReport)
     }
+    private var locationRevision by mutableIntStateOf(0)
+    private var locationRequestInFlight = false
+    private var checkLocationOnNextStart = false
+    private val locationPermission = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        locationRequestInFlight = false
+        refreshLocationPermission()
+    }
+    private val locationSettings = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        locationRequestInFlight = false
+        refreshLocationPermission()
+    }
+
+    private fun refreshLocationPermission() {
+        model.refreshLocationPermission()
+        if (checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            getSharedPreferences("location-permission", MODE_PRIVATE).edit().clear().apply()
+        }
+        locationRevision++
+    }
+
+    private fun canRequestLocation(): Boolean {
+        val prefs = getSharedPreferences("location-permission", MODE_PRIVATE)
+        return io.github.ibudaoa.domain.LocationPermissionPolicy.canRequest(
+            prefs.getBoolean("asked", false),
+            shouldShowRequestPermissionRationale(android.Manifest.permission.ACCESS_FINE_LOCATION),
+            checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED,
+            prefs.getBoolean("precision-upgrade-asked", false))
+    }
+
+    private fun requestLocationPermission() {
+        if (locationRequestInFlight || !lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) return
+        val fine = android.Manifest.permission.ACCESS_FINE_LOCATION
+        if (checkSelfPermission(fine) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            refreshLocationPermission()
+            return
+        }
+        val prefs = getSharedPreferences("location-permission", MODE_PRIVATE)
+        locationRequestInFlight = true
+        try {
+            if (!canRequestLocation()) {
+                locationSettings.launch(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    android.net.Uri.parse("package:$packageName")))
+            } else {
+                prefs.edit().putBoolean("asked", true).apply {
+                    if (checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+                        putBoolean("precision-upgrade-asked", true)
+                }.apply()
+                locationPermission.launch(arrayOf(fine, android.Manifest.permission.ACCESS_COARSE_LOCATION))
+            }
+        } catch (_: Exception) {
+            locationRequestInFlight = false
+            model.showMessage("无法打开定位授权，请在应用设置中开启定位。")
+        }
+    }
+
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         requestVpnConsent()
     }
@@ -44,6 +102,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        locationRequestInFlight = savedInstanceState?.getBoolean("location-request-in-flight") ?: false
+        refreshLocationPermission()
         enableEdgeToEdge()
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
@@ -75,44 +135,55 @@ class MainActivity : ComponentActivity() {
                 }
                 onDispose { window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
             }
-            IbudaoaTheme {
-                IbudaoaApp(
-                    state = state,
-                    events = model.events,
-                    onDiagnosticMode = model::setDiagnosticMode,
-                    onAcknowledgePreparation = { model.continuePreparation(lifecycle) },
-                    onImport = { importConfig.launch(arrayOf("application/json", "text/plain")) },
-                    onExport = { if(state.automaticRun.blocksExternalUi)model.showMessage("请等待本次执行与记录核对结束后再导出，打开文件选择器会离开前台。") else exportConfig.launch("ibudaoa-diagnostic.json") },
-                    onExportConnectionReport = { if(state.automaticRun.blocksExternalUi)model.showMessage("请等待本次执行与记录核对结束后再导出。") else exportConnectionReport.launch("ibudaoa-connection-report.json") },
-                    onClear = model::clearDiagnostic,
-                    onMessage = model::showMessage,
-                    onMapConsent = model::setMapConsent,
-                    onReconnect = model::reconnectAccount,
-                    onAccountReadCheck = model::continueAccountSession,
-                    onVerifyAccountSession = model::verifyAccountSession,
-                    onDisconnectAccountSession = model::disconnectAccountSession,
-                    onCheckRoadGaps = { model.checkRoadGaps(lifecycle) },
-                    onSetManualGap = model::setManualGap,
-                    onSetReviewedDirection = model::setReviewedDirection,
-                    onConfirmAllDirections = model::confirmAllReviewedDirections,
-                    onConfirmAllRoadConnections = model::confirmAllRoadConnectionsAndDirections,
-                    onDisplayFix = model::updateDisplayFix,
-                    onLocationDiagnostics = model::updateLocationDiagnostics,
-                    onPrepareLocalPreview = model::prepareLocalPreview,
-                    onPrepareRunningPlan = { model.prepareRunningPlan(lifecycle) },
-                    onAutomaticAction = { model.automaticAction(lifecycle) },
-                    onFinishAutomatic = model::finishAutomatic,
-                    onArchiveAutomatic = model::archiveManuallyReviewedAutomatic,
-                    onCheckUpdates = model::checkUpdates,
-                    onConfirmPreviewOrigin = model::confirmLocalPreviewOrigin,
-                    onClosePreviewReview = model::closeLocalPreviewReview,
-                    onCancelCapture = {
-                        model.cancelCapture()
-                        CaptureVpnService.stopOwned(this)
-                    },
-                )
+            CompositionLocalProvider(io.github.ibudaoa.maps.LocalLocationPermission provides
+                io.github.ibudaoa.maps.LocationPermissionAccess(locationRevision,
+                    canRequestLocation(),
+                    ::requestLocationPermission)) {
+                IbudaoaTheme {
+                    IbudaoaApp(
+                        state = state,
+                        events = model.events,
+                        onDiagnosticMode = model::setDiagnosticMode,
+                        onAcknowledgePreparation = { model.continuePreparation(lifecycle) },
+                        onImport = { importConfig.launch(arrayOf("application/json", "text/plain")) },
+                        onExport = { if(state.automaticRun.blocksExternalUi)model.showMessage("请等待本次执行与记录核对结束后再导出，打开文件选择器会离开前台。") else exportConfig.launch("ibudaoa-diagnostic.json") },
+                        onExportConnectionReport = { if(state.automaticRun.blocksExternalUi)model.showMessage("请等待本次执行与记录核对结束后再导出。") else exportConnectionReport.launch("ibudaoa-connection-report.json") },
+                        onClear = model::clearDiagnostic,
+                        onMessage = model::showMessage,
+                        onMapConsent = model::setMapConsent,
+                        onLocationStartupHandled = model::acknowledgeLocationStartup,
+                        onReconnect = model::reconnectAccount,
+                        onAccountReadCheck = model::continueAccountSession,
+                        onVerifyAccountSession = model::verifyAccountSession,
+                        onDisconnectAccountSession = model::disconnectAccountSession,
+                        onCheckRoadGaps = { model.checkRoadGaps(lifecycle) },
+                        onSetManualGap = model::setManualGap,
+                        onSetReviewedDirection = model::setReviewedDirection,
+                        onConfirmAllDirections = model::confirmAllReviewedDirections,
+                        onConfirmAllRoadConnections = model::confirmAllRoadConnectionsAndDirections,
+                        onDisplayFix = model::updateDisplayFix,
+                        onLocationDiagnostics = model::updateLocationDiagnostics,
+                        onPrepareLocalPreview = model::prepareLocalPreview,
+                        onPrepareRunningPlan = { model.prepareRunningPlan(lifecycle) },
+                        onAutomaticAction = { model.automaticAction(lifecycle) },
+                        onFinishAutomatic = model::finishAutomatic,
+                        onArchiveAutomatic = model::archiveManuallyReviewedAutomatic,
+                        onCheckUpdates = model::checkUpdates,
+                        onConfirmPreviewOrigin = model::confirmLocalPreviewOrigin,
+                        onClosePreviewReview = model::closeLocalPreviewReview,
+                        onCancelCapture = {
+                            model.cancelCapture()
+                            CaptureVpnService.stopOwned(this)
+                        },
+                    )
+                }
             }
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean("location-request-in-flight", locationRequestInFlight)
+        super.onSaveInstanceState(outState)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -122,11 +193,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        if (checkLocationOnNextStart) {
+            checkLocationOnNextStart = false
+            model.onLocationStartup()
+        }
         model.onForegroundReturned()
     }
 
     override fun onResume() {
         super.onResume()
+        refreshLocationPermission()
         model.onAutomaticForegroundReturned()
         val returnedGeneration=intent.getLongExtra("capture_return_generation",-1L)
         if (returnedGeneration == io.github.ibudaoa.capture.CaptureRuntime.state.value.generation &&
@@ -193,6 +269,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        if (!isChangingConfigurations && !locationRequestInFlight) checkLocationOnNextStart = true
         if (!isChangingConfigurations) model.onForegroundLost()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         super.onStop()

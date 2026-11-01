@@ -6,8 +6,6 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.SystemClock
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -71,11 +69,7 @@ fun CampusMap(config: DiagnosticConfig?, consent: Boolean, active: Boolean, road
     var locationStatus by remember { mutableStateOf("等待前台定位") }
     var locationCheck by remember { mutableStateOf<LocationDiagnostics?>(null) }
     var permissionRevision by remember { mutableIntStateOf(0) }
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        permissionRevision++
-        locationStatus = if (it[Manifest.permission.ACCESS_FINE_LOCATION] == true) "正在获取位置"
-            else "未获精确定位权限，仍可查看学校地图"
-    }
+    val permission = LocalLocationPermission.current
     val host = remember(context, config, attempt) {
         if (Build.SUPPORTED_ABIS.none { it == "arm64-v8a" || it == "armeabi-v7a" }) null
         else try {
@@ -105,7 +99,7 @@ fun CampusMap(config: DiagnosticConfig?, consent: Boolean, active: Boolean, road
         if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) host.resume()
         onDispose { lifecycle.removeObserver(observer); host.destroy() }
     }
-    DisposableEffect(host, lifecycle, active, automaticDisplay, permissionRevision) {
+    DisposableEffect(host, lifecycle, active, automaticDisplay, permissionRevision, permission.revision) {
         if (host == null) return@DisposableEffect onDispose { }
         val locator = ForegroundAmapLocation(context)
         fun stop() { locator.stop(); host.showFix(null); latestOnFix(null) }
@@ -144,7 +138,7 @@ fun CampusMap(config: DiagnosticConfig?, consent: Boolean, active: Boolean, road
                 Text(locationStatus, style = MaterialTheme.typography.labelSmall)
                 if (context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
                     TextButton(onClick = {
-                        launcher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+                        permission.request()
                     }) { Text("允许前台定位") }
                 } else if (locationCheck?.status != LocationCheckStatus.ACCEPTED) {
                     TextButton(onClick={ permissionRevision++ }) { Text("重新获取位置") }

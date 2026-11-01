@@ -125,6 +125,7 @@ fun IbudaoaApp(
     onMessage: (String) -> Unit,
     onCancelCapture: () -> Unit,
     onMapConsent: (Boolean) -> Unit,
+    onLocationStartupHandled: () -> Unit,
     onReconnect: () -> Unit,
     onAccountReadCheck: () -> Unit,
     onVerifyAccountSession: () -> Unit,
@@ -155,13 +156,21 @@ fun IbudaoaApp(
     var showWarmup by rememberSaveable { mutableStateOf(true) }
     var showSummary by rememberSaveable { mutableStateOf(false) }
     var confirmClear by rememberSaveable { mutableStateOf(false) }
-    var showMapPrivacy by rememberSaveable { mutableStateOf(false) }
     var showGapCheck by rememberSaveable { mutableStateOf(false) }
     val reviewingOrigin = state.localPreview != null && state.previewSummary?.phase == PreviewPhase.REVIEW_ORIGIN
-    val uriHandler = LocalUriHandler.current
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(events) { events.collect { snackbar.showSnackbar(it) } }
-    LaunchedEffect(state.loaded) { if(state.loaded && state.preparationRoadsReady) showWarmup=false }
+    val locationPermission = io.github.ibudaoa.maps.LocalLocationPermission.current
+    var attemptedLocation by rememberSaveable(state.locationCheckCycle) { mutableStateOf(false) }
+    var finishAfterLocation by rememberSaveable(state.locationCheckCycle) { mutableStateOf(false) }
+    LaunchedEffect(state.loaded, state.locationCheckCycle, state.locationStartupPending) {
+        if (state.loaded && state.locationStartupPending) {
+            attemptedLocation = false
+            onLocationStartupHandled()
+            finishAfterLocation = state.preparationRoadsReady && (!state.locationGranted || !state.mapConsent)
+            showWarmup = !state.preparationRoadsReady || !state.locationGranted || !state.mapConsent
+        }
+    }
     val foreground = LocalLifecycleOwner.current.lifecycle.currentStateAsState().value.isAtLeast(Lifecycle.State.RESUMED)
     var attemptedRoadScope by rememberSaveable { mutableStateOf<String?>(null) }
     val roadScopeKey = "${state.connectionEpoch}:${state.config.hashCode()}"
@@ -169,17 +178,29 @@ fun IbudaoaApp(
         DiagnosticStore.CURRENT_CAPTURE_REVISION, state.capture.active, BuildConfig.MAP_KEY_CONFIGURED,
         state.mapConsent, state.preparationRoadReport?.phase, state.busy,
         state.preparationRoadReport?.reviewRevision ?: io.github.ibudaoa.roads.RoadBatchReport.CURRENT_REVIEW_REVISION,
-        state.preparationRoadsReady)
-    LaunchedEffect(showWarmup, foreground, state.capture.active, state.capturedConfig, state.captureRevision,
-        state.busy, state.mapConsent, state.roadReport, state.certificateSetup, state.preparationError) {
-        if (showWarmup && state.loaded && foreground && !state.busy && !state.capture.active && state.capture.phase != CapturePhase.ERROR &&
+        state.preparationRoadsReady, state.locationGranted)
+    LaunchedEffect(showWarmup, foreground, state.loaded, state.capture.active, state.capturedConfig, state.captureRevision,
+        state.busy, state.mapConsent, state.locationGranted, state.locationStartupPending, state.roadReport, state.certificateSetup, state.preparationError) {
+        if (showWarmup && state.loaded && !state.locationStartupPending && foreground && !state.busy && !state.capture.active && state.capture.phase != CapturePhase.ERROR &&
             state.capturedConfig && state.captureRevision == DiagnosticStore.CURRENT_CAPTURE_REVISION &&
             !needsCertificateSetup(state.certificateSetup, state.capturedConfig, state.certificateTrusted, false) &&
-            !state.preparationRoadsReady && attemptedRoadScope != roadScopeKey && state.preparationError == null &&
-            automaticStep in setOf(PreparationStep.CHECK_ROADS, PreparationStep.MAP_CONSENT)) {
-            if (!BuildConfig.MAP_KEY_CONFIGURED) return@LaunchedEffect
-            if (!state.mapConsent) { showWarmup = false; showMapPrivacy = true }
-            else { attemptedRoadScope = roadScopeKey; onAcknowledgePreparation() }
+            automaticStep == PreparationStep.ENABLE_LOCATION) {
+            if (state.locationGranted) {
+                if (!state.mapConsent) onMapConsent(true)
+            } else if (!attemptedLocation) {
+                attemptedLocation = true
+                if (locationPermission.canRequestAutomatically) locationPermission.request()
+            }
+        } else if (showWarmup && state.loaded && foreground && state.locationGranted && state.mapConsent &&
+            !state.busy && !state.capture.active && state.capture.phase != CapturePhase.ERROR &&
+            !needsCertificateSetup(state.certificateSetup, state.capturedConfig, state.certificateTrusted, false)) {
+            if (finishAfterLocation && state.preparationRoadsReady) {
+                finishAfterLocation = false
+                showWarmup = false
+            } else if (automaticStep == PreparationStep.CHECK_ROADS && attemptedRoadScope != roadScopeKey && state.preparationError == null) {
+                attemptedRoadScope = roadScopeKey
+                onAcknowledgePreparation()
+            }
         }
     }
 
@@ -212,7 +233,7 @@ fun IbudaoaApp(
                     onAutomaticAction = onAutomaticAction,
                     onFinishAutomatic = onFinishAutomatic,
                     onArchiveAutomatic = onArchiveAutomatic,
-                    mapActive = !showWarmup && !showSummary && !confirmClear && !showMapPrivacy && !showGapCheck && !showManualGaps && !showRoadDirections && !showAccountCheck && !reviewingOrigin && !state.capture.active,
+                    mapActive = !showWarmup && !showSummary && !confirmClear && !showGapCheck && !showManualGaps && !showRoadDirections && !showAccountCheck && !reviewingOrigin && !state.capture.active,
                 )
                 Destination.SETTINGS -> SettingsPage(
                     state = state,
@@ -387,35 +408,19 @@ fun IbudaoaApp(
         WarmupDialog(
             state = state,
             onContinue = {
-                if (state.preparationRoadsReady && !state.busy && !state.capture.active && state.capture.phase != CapturePhase.ERROR &&
+                if (state.locationGranted && state.mapConsent && state.preparationRoadsReady && !state.busy && !state.capture.active && state.capture.phase != CapturePhase.ERROR &&
                     state.capturedConfig && state.captureRevision == DiagnosticStore.CURRENT_CAPTURE_REVISION) {
                     showWarmup = false
-                } else if (state.capturedConfig && !state.capture.active && !state.mapConsent &&
+                } else if (state.capturedConfig && !state.capture.active && (!state.locationGranted || !state.mapConsent) &&
                     !needsCertificateSetup(state.certificateSetup, state.capturedConfig, state.certificateTrusted, false)) {
-                    showWarmup = false; showMapPrivacy = true
+                    if (state.locationGranted) onMapConsent(true)
+                    else { attemptedLocation = true; locationPermission.request() }
                 } else {
                     attemptedRoadScope = roadScopeKey
                     onAcknowledgePreparation()
                 }
             },
             onDismiss = { onCancelCapture(); showWarmup = false },
-        )
-    }
-    if (showMapPrivacy) {
-        AlertDialog(
-            onDismissRequest = { showMapPrivacy = false },
-            title = { Text("启用地图与前台定位") },
-            text = {
-                Column {
-                    Text("学校地图和起点定位使用高德 SDK，联网处理位置、设备和网络信息，仅在地图页前台请求定位。接入路线查询会将起点发送给高德。点击开始自动运行后，程序会向当前账号的运动平台提交生成的轨迹，其中包括确认的起点和路径。个人位置与完整轨迹不写入诊断导出或普通日志。拒绝仍可浏览配置。")
-                    TextButton(onClick = {
-                        runCatching { uriHandler.openUri("https://lbs.amap.com/pages/privacy/") }
-                            .onFailure { onMessage("无法打开高德隐私政策，请检查浏览器。") }
-                    }) { Text("查看高德隐私政策") }
-                }
-            },
-            confirmButton = { TextButton(onClick = { showMapPrivacy = false; showWarmup = true; onMapConsent(true) }) { Text("同意并启用") } },
-            dismissButton = { TextButton(onClick = { showMapPrivacy = false }) { Text("暂不启用") } },
         )
     }
     if (showSummary) {
@@ -765,12 +770,13 @@ internal fun SettingsPage(state: AppState, onExit: () -> Unit, onConnect: () -> 
                     style = MaterialTheme.typography.bodyMedium)
                 TextButton(onClick=onAccountCheck,enabled=!state.busy && !state.capture.active) { Text("账号连接") }
                 Text(state.accountSession.label,style=MaterialTheme.typography.bodySmall)
-                if (state.capture.purpose==CapturePurpose.ACCOUNT_READ_CHECK && state.capture.accountRead!=null)
+                if (state.capture.purpose==CapturePurpose.ACCOUNT_READ_CHECK && state.capture.accountRead!=null) {
                     Text(when(state.capture.accountRead.outcome) {
                         AccountReadOutcome.PASSED -> "本次只读校验通过 · 未保留会话"
                         AccountReadOutcome.READ_ACCEPTED_UNBOUND -> "独立读取成功 · 账号归属未核实 · 未保留会话"
                         else -> "本次只读校验未通过"
                     },style=MaterialTheme.typography.bodySmall)
+                }
                 HorizontalDivider(color = colors.primary.copy(alpha = 0.12f))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                     TextButton(onClick = onConnect) {
@@ -838,11 +844,13 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
     val capture = state.capture
     val roads = state.preparationRoadReport
     val needsCapture = !state.capturedConfig || state.captureRevision != DiagnosticStore.CURRENT_CAPTURE_REVISION
-    val roadStep = !certificateStep && !capture.active && !needsCapture && capture.phase != CapturePhase.ERROR
+    val accountReady = !certificateStep && !capture.active && !needsCapture && capture.phase != CapturePhase.ERROR
+    val locationStep = accountReady && (!state.locationGranted || !state.mapConsent)
+    val roadStep = accountReady && !locationStep
     val ready = roadStep && state.preparationRoadsReady && !state.busy
     val failed = roadStep && !state.busy && (state.preparationError != null ||
         roads?.phase in setOf(RoadBatchPhase.FAILED, RoadBatchPhase.INTERRUPTED, RoadBatchPhase.COMPLETE) && !ready)
-    val current = when { certificateStep -> 0; !roadStep -> 1; ready -> 3; else -> 2 }
+    val current = when { certificateStep -> 0; !accountReady -> 1; locationStep -> 2; ready -> 4; else -> 3 }
     val heading = when {
         certificateStep -> when (setup) {
             CertificateSetupPhase.CHECK_FAILED -> "暂时无法检查证书，请重试。"
@@ -853,7 +861,7 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
         capture.phase == CapturePhase.FINALIZING -> capture.message
         capture.phase == CapturePhase.ERROR && !roadStep -> capture.message
         !BuildConfig.MAP_KEY_CONFIGURED && roadStep -> "地图服务尚未配置，暂时无法核对道路。"
-        !state.mapConsent && roadStep -> "请先同意地图服务隐私政策。"
+        locationStep -> "开启定位"
         failed -> state.preparationError ?: if (roads?.phase == RoadBatchPhase.INTERRUPTED) "道路核对已中断，请重试。" else "道路核对未完成，请重试。"
         ready -> "道路核对完成"
         else -> "核对道路中……"
@@ -865,7 +873,7 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
             CertificateSetupPhase.CHECKING, CertificateSetupPhase.SAVING -> "正在准备…"
             else -> "开始配置"
         }
-        roadStep && !state.mapConsent -> "同意并继续"
+        locationStep -> "开启定位"
         failed -> "重试"
         roadStep -> "完成"
         capture.phase == CapturePhase.FINALIZING -> "正在保存…"
@@ -876,7 +884,7 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
     }
     val enabled = !state.busy && capture.phase !in setOf(CapturePhase.STARTING, CapturePhase.FINALIZING) &&
         setup !in setOf(CertificateSetupPhase.CHECKING, CertificateSetupPhase.SAVING) &&
-        (!roadStep || ready || failed || !state.mapConsent)
+        (!roadStep || ready || failed)
     val content: @Composable () -> Unit = {
         Surface(Modifier.padding(horizontal = 16.dp, vertical = 24.dp).widthIn(max = 560.dp)
             .fillMaxWidth().fillMaxHeight(0.78f), shape = RoundedCornerShape(28.dp),
@@ -891,7 +899,7 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
                     Text("跑前热身", Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
                         style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(10.dp))
-                    Text("已完成 $current / 3 项", Modifier.fillMaxWidth(),
+                    Text("已完成 $current / 4 项", Modifier.fillMaxWidth(),
                         textAlign = TextAlign.Center, style = MaterialTheme.typography.bodyLarge)
                     Spacer(Modifier.height(32.dp))
                     Stepper(current)
@@ -906,6 +914,12 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
                         (capture.active || needsCapture) && capture.phase != CapturePhase.FINALIZING) {
                         Text("1.允许临时VPN\n\n2.在乐跑界面（就是那个大鸟的界面）停几秒\n\n3.等待自动跳转回来",
                             style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    } else if (locationStep) {
+                        Text("开启定位", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        val uriHandler = LocalUriHandler.current
+                        TextButton(onClick = { runCatching { uriHandler.openUri("https://lbs.amap.com/pages/privacy/") } }) {
+                            Text("查看高德隐私政策")
+                        }
                     } else {
                         Text(heading, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                         if (roadStep) {
@@ -944,7 +958,7 @@ private fun formatPace(seconds: Int): String = String.format(Locale.ROOT, "%d′
 
 @Composable
 private fun Stepper(current: Int) {
-    val labels = listOf("授权准备", "连接账号", "运行准备")
+    val labels = listOf("授权准备", "连接账号", "开启定位", "运行准备")
     val colors = MaterialTheme.colorScheme
     Box(Modifier.fillMaxWidth()) {
         Canvas(Modifier.fillMaxWidth().height(36.dp)) {
