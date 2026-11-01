@@ -145,7 +145,7 @@ internal object AccountProtocol {
     fun inherit(saved:ByteArray,projected:ByteArray):ByteArray {
         val a=root(saved);val b=root(projected);val pa=params(a);val pb=params(b)
         if(listOf("uid","token","mobileDeviceId").any { pa[it]!=pb[it] }) return projected.clone()
-        val inherited=b+a.filterKeys {it in setOf("umid","refresh_token","refresh_state")} +
+        val inherited=b+a.filterKeys {it in setOf("umid","refresh_token","refresh_state","display_name")} +
             ("parameters" to JsonObject((pa+pb).mapValues {JsonPrimitive(it.value)}))
         return JsonObject(inherited).toString().toByteArray()
     }

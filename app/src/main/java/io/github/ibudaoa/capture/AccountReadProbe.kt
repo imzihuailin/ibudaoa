@@ -236,8 +236,9 @@ internal object AccountReadProbe {
     internal fun restoreFromStorage(bytes:ByteArray):LocalRequest {
         require(bytes.size in 1..MAX_REQUEST)
         val root=Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)).jsonObject
-        require(root.keys.all { it in setOf("schema","strip_spaces","parameters","user_agent","umid","refresh_token","refresh_state") })
+        require(root.keys.all { it in setOf("schema","strip_spaces","parameters","user_agent","umid","refresh_token","refresh_state","display_name") })
         require(root.getValue("schema").jsonPrimitive.int==1)
+        root["display_name"]?.let { require(it.jsonPrimitive.isString && AccountProfileDecoder.validName(it.jsonPrimitive.content)) }
         val strip=root.getValue("strip_spaces").jsonPrimitive.boolean
         root["umid"]?.let { require(it.jsonPrimitive.isString && it.jsonPrimitive.content.matches(Regex("[!-~]{1,256}"))) }
         root["refresh_token"]?.let { require(it.jsonPrimitive.isString && it.jsonPrimitive.content.length in 1..4096 && it.jsonPrimitive.content.none(Char::isISOControl)) }

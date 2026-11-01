@@ -230,7 +230,7 @@ fun IbudaoaApp(
                     onExit = { onCancelCapture(); onClear() },
                     onConnect = { showWarmup = true; onReconnect() },
                     onMessage = onMessage,
-                    onDisableMap = { onMapConsent(false) }, onCheckUpdates=onCheckUpdates, onDiagnosticMode=onDiagnosticMode,
+                    onCheckUpdates=onCheckUpdates, onDiagnosticMode=onDiagnosticMode,
                 )
             }
         }
@@ -711,11 +711,7 @@ private fun Metric(label: String, value: String, modifier: Modifier = Modifier) 
 }
 
 @Composable
-internal fun SettingsPage(state: AppState, onExit: () -> Unit, onConnect: () -> Unit, onMessage: (String) -> Unit, onDisableMap: () -> Unit, onCheckUpdates: () -> Unit, onDiagnosticMode: (Boolean) -> Unit) {
-    val profile = state.capture.profile?.takeIf {
-        state.capturedConfig && state.capture.phase == CapturePhase.CAPTURED &&
-            it.schoolName != null && it.schoolName == state.config?.schoolName
-    }
+internal fun SettingsPage(state: AppState, onExit: () -> Unit, onConnect: () -> Unit, onMessage: (String) -> Unit, onCheckUpdates: () -> Unit, onDiagnosticMode: (Boolean) -> Unit) {
     val colors = MaterialTheme.colorScheme
     Column(Modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -725,18 +721,19 @@ internal fun SettingsPage(state: AppState, onExit: () -> Unit, onConnect: () -> 
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                     Icon(Icons.Default.AccountCircle, null, Modifier.size(64.dp), tint = colors.primary)
                     Column {
-                        Text(profile?.name ?: if (state.capturedConfig) "已读取官方配置" else "未连接账号", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Text(state.accountSession.displayName ?: if (state.capturedConfig || state.accountSession.credentialsPersisted) "已登录" else "未登录", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                         Text(if (state.accountSession.credentialsPersisted) "登录已在本机加密保存"
                             else if (state.capturedConfig) "已读取配置，登录尚未保存" else "连接后读取学校配置", style = MaterialTheme.typography.bodyMedium)
                     }
                 }
                 Text(if (state.capturedConfig) "${state.config?.schoolName ?: "学校名称待核对"}\n${state.config?.campusName ?: "跑区名称待核对"}" else "请先在官方应用登录，再连接读取学校配置。完整账号资料将在后续版本接入。",
                     style = MaterialTheme.typography.bodyMedium)
-                Text(state.accountSession.label,style=MaterialTheme.typography.bodySmall)
+                Text(if (state.accountSession.phase == io.github.ibudaoa.capture.AccountSessionPhase.READY &&
+                    state.accountSession.lastRead?.readAccepted == true) "已连接" else state.accountSession.label,style=MaterialTheme.typography.bodySmall)
                 if (state.capture.purpose==CapturePurpose.ACCOUNT_READ_CHECK && state.capture.accountRead!=null) {
                     Text(when(state.capture.accountRead.outcome) {
                         AccountReadOutcome.PASSED -> "本次只读校验通过 · 未保留会话"
-                        AccountReadOutcome.READ_ACCEPTED_UNBOUND -> "独立读取成功 · 账号归属未核实 · 未保留会话"
+                        AccountReadOutcome.READ_ACCEPTED_UNBOUND -> "账号归属未核实 · 未保留会话"
                         else -> "本次只读校验未通过"
                     },style=MaterialTheme.typography.bodySmall)
                 }
@@ -745,21 +742,19 @@ internal fun SettingsPage(state: AppState, onExit: () -> Unit, onConnect: () -> 
                     TextButton(onClick = onConnect) {
                         Icon(Icons.Default.Link, null, Modifier.size(20.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text(if (state.capturedConfig) "重新连接" else "连接账号")
+                        Text(if (state.capturedConfig || state.accountSession.credentialsPersisted) "重新登录" else "登录账号")
                     }
                     TextButton(onClick = onExit, enabled = state.capturedConfig && !state.capture.active && !state.busy) {
                         Icon(Icons.AutoMirrored.Filled.Logout, null, Modifier.size(20.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text("退出连接")
+                        Text("退出登录")
                     }
                 }
             }
         }
-        if (state.mapConsent) TextButton(onClick = onDisableMap, enabled = !state.busy) { Text("停用地图与定位") }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text("调试模式")
-            Text("保留少量诊断以排查问题，关闭后清除。", style=MaterialTheme.typography.bodySmall)
         }
         androidx.compose.material3.Switch(checked=state.diagnosticMode, onCheckedChange=onDiagnosticMode,
             enabled=!state.busy && !state.automaticRun.blocksExternalUi)

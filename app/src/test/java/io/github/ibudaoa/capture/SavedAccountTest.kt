@@ -42,6 +42,42 @@ class SavedAccountTest {
         override fun send(request:LocalRequest):ByteArray { count++;inspect?.invoke(request);if(fail)throw IOException("PRIVATE_ERROR");return """{"status":1,"data":{}}""".toByteArray() }
         override fun close() {}
     }
+    @Test fun `profile is encrypted restored excluded from requests and removed on logout`() {
+        val store=Store();val session=restored(store);connect(session)
+        assertNull(session.state.value.displayName) // Old storage remains usable.
+        val client=object:AccountReadConnection {
+            override fun send(request:LocalRequest):ByteArray {
+                assertFalse(request.body.toString(Charsets.UTF_8).contains("测试用户"))
+                return """{"status":1,"data":{"uid":42,"name":"测试用户","school_name":"测试大学"}}""".toByteArray()
+            }
+            override fun close() {}
+        }
+        session.read(client,1793000100,654321)
+        assertEquals("测试用户",session.state.value.displayName)
+        assertFalse(store.sealed!!.toString(Charsets.UTF_8).contains("测试用户"))
+        assertEquals("测试用户",restored(store).state.value.displayName)
+        assertFalse(AccountSessionReport.summary(session.state.value).toString().contains("测试用户"))
+        session.clear();assertNull(session.state.value.displayName)
+        assertNull(restored(store).state.value.displayName)
+    }
+    @Test fun `mismatched account response cannot replace display name`() {
+        val store=Store();val session=restored(store);connect(session)
+        session.read(object:AccountReadConnection {
+            override fun send(request:LocalRequest)="""{"status":1,"data":{"uid":99,"name":"其他用户"}}""".toByteArray()
+            override fun close() {}
+        },1793000100,654321)
+        assertNull(session.state.value.displayName)
+        assertNull(restored(store).state.value.displayName)
+    }
+    @Test fun `replacement credentials do not inherit another accounts display name`() {
+        val old=Json.parseToJsonElement(AccountReadProbe.projectForStorage(request()).toString(Charsets.UTF_8)).jsonObject
+        val named=JsonObject(old+mapOf("display_name" to JsonPrimitive("原用户"))).toString().toByteArray()
+        val newRoot=JsonObject(old+mapOf("parameters" to JsonObject(old.getValue("parameters").jsonObject+mapOf("uid" to JsonPrimitive("99")))))
+        val inherited=AccountProtocol.inherit(named,newRoot.toString().toByteArray())
+        assertFalse(inherited.toString(Charsets.UTF_8).contains("原用户"))
+        val same=AccountProtocol.inherit(named,old.toString().toByteArray())
+        assertTrue(same.toString(Charsets.UTF_8).contains("原用户"))
+    }
     @Test fun `persistence projection excludes complete requests clocks cookies and unrelated identifiers`() {
         val bytes=AccountReadProbe.projectForStorage(request())
         val text=bytes.toString(Charsets.UTF_8)

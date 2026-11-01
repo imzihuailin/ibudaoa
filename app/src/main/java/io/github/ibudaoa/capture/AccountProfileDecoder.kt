@@ -2,10 +2,14 @@ package io.github.ibudaoa.capture
 
 import kotlinx.serialization.json.JsonPrimitive
 
-/** Process-only display preview; does not contain or persist credentials, IDs, or raw responses. */
+/** Sanitized display fields only; never credentials, IDs, or raw responses. */
 data class AccountProfilePreview(val name: String?, val schoolName: String?)
 
 object AccountProfileDecoder {
+    internal fun validName(value: String): Boolean = value.isNotBlank() && value == value.trim() &&
+        value.length <= 64 && value.none(Char::isISOControl) &&
+        !Regex("\\p{Nd}{6,}").containsMatchIn(value) && !value.contains("://") && !value.contains('@')
+
     fun decode(bytes: ByteArray): AccountProfilePreview? {
         val data = BeforeRunDecoder.decodeSuccessfulData(bytes)
         fun text(key: String): String? {

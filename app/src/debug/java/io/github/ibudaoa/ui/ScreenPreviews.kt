@@ -87,7 +87,7 @@ private fun sampleState(scene: PreviewScene): AppState {
         loaded = true, config = config, capturedConfig = true, mapConsent = true, locationGranted = true,
         captureRevision = DiagnosticStore.CURRENT_CAPTURE_REVISION,
         capture = CaptureState(phase = CapturePhase.CAPTURED, profile = AccountProfilePreview("示意用户", "示意大学")),
-        accountSession = AccountSessionSnapshot(phase = AccountSessionPhase.RESTORED, credentialsPersisted = true),
+        accountSession = AccountSessionSnapshot(phase = AccountSessionPhase.RESTORED, credentialsPersisted = true, displayName = "示意用户"),
         runningPlanSummary = RunningPlanSummary(
             phase = RunningPlanPhase.PLANNED, distanceMeters = 2400,
             paceSecondsPerKm = 360, durationSeconds = 864, pointCount = 2,
@@ -133,7 +133,7 @@ private fun ScreenPreview(scene: PreviewScene) {
         Scaffold(bottomBar = { AppNavigation(destination) {} }) { padding ->
             Box(Modifier.fillMaxSize().padding(padding)) {
                 when (destination) {
-                    Destination.SETTINGS -> SettingsPage(state, {}, {}, {}, {}, {}, {})
+                    Destination.SETTINGS -> SettingsPage(state, {}, {}, {}, {}, {})
                     else -> MapPage(
                         state = state, runningPage = destination == Destination.RUN,
                         onWarmup = {}, onImport = {}, onExport = {}, onExportConnectionReport = {},

@@ -29,6 +29,7 @@ data class AccountSessionSnapshot(
     val lastPreparation:LivePreparationSnapshot?=null,
     val preparationCurrent:Boolean=false,
     val refreshState:AccountRefreshState=AccountRefreshState.MISSING,
+    val displayName:String?=null,
 ) {
     val available:Boolean get()=phase in setOf(AccountSessionPhase.RESTORED,AccountSessionPhase.READY,
         AccountSessionPhase.CHECKING,AccountSessionPhase.SUSPENDED,AccountSessionPhase.RETRYABLE)
@@ -82,7 +83,9 @@ internal class ForegroundAccountSession(private val clock:()->Long={System.nanoT
     }
     private fun wipeCandidates() { protocolCandidates.forEach { it.fill(0) };protocolCandidates.clear() }
     private fun flags() {
-        mutable.value=mutable.value.copy(protocolReady=material?.let(AccountProtocol::ready)==true,
+        mutable.value=mutable.value.copy(displayName=material?.let {
+            Json.parseToJsonElement(it.toString(Charsets.UTF_8)).jsonObject["display_name"]?.jsonPrimitive?.content
+        }, protocolReady=material?.let(AccountProtocol::ready)==true,
             refreshAvailable=material?.let(AccountProtocol::hasRefresh)==true,
             refreshState=material?.takeIf(AccountProtocol::hasRefresh)?.let { AccountRefreshState.valueOf(AccountProtocol.refreshState(it)) } ?: AccountRefreshState.MISSING)
     }
@@ -266,6 +269,7 @@ internal class ForegroundAccountSession(private val clock:()->Long={System.nanoT
         generation++;credentialRevision++;cancelRead();material?.fill(0);material=null;pending?.fill(0);pending=null;wipeCandidates()
         pendingRotation?.fill(0);pendingRotation=null
         awaitingReturn=false;loaded=true
+        mutable.value=mutable.value.copy(displayName=null)
         try {
             storage?.delete()
             mutable.value=mutable.value.copy(phase=AccountSessionPhase.CLEARED,end=reason,credentialsPersisted=false,restoredFromStorage=false,
@@ -294,12 +298,19 @@ internal class ForegroundAccountSession(private val clock:()->Long={System.nanoT
         val started=System.nanoTime()
         fun currentTime()=nowSeconds+(System.nanoTime()-started)/1_000_000_000
         fun nextNonce()=100_000+(nonce-100_000+step++).mod(900_000)
+        var readProfile:AccountProfilePreview?=null
         fun accountRead():AccountReadResult {
             var result=AccountReadResult(AccountReadOutcome.NETWORK_ERROR)
             repeat(2) {
                 synchronized(this) { if(ticket!=generation || !foreground || revision!=credentialRevision) return result }
                 val request=AccountReadProbe.restoreFromStorage(working)
-                result=AccountReadProbe.readRetained(request,currentTime(),nextNonce()) { body -> connection.send(request.copy(body=body)) }
+                var candidate:AccountProfilePreview?=null
+                result=AccountReadProbe.readRetained(request,currentTime(),nextNonce()) { body ->
+                    connection.send(request.copy(body=body)).also { response ->
+                        candidate=runCatching { AccountProfileDecoder.decode(response) }.getOrNull()
+                    }
+                }
+                readProfile=if(result.readAccepted) candidate else null
                 if(result.outcome!=AccountReadOutcome.NETWORK_ERROR)return result
             }
             return result
@@ -402,6 +413,19 @@ internal class ForegroundAccountSession(private val clock:()->Long={System.nanoT
         }
         synchronized(this) {
             if(ticket!=generation || !foreground || revision!=credentialRevision) return
+            // The profile came from the same independently checked account response.
+            // Keep it in the existing encrypted envelope, never in signed request parameters.
+            val name=readProfile?.name
+            if(result.readAccepted && name!=null && name!=mutable.value.displayName) {
+                val root=Json.parseToJsonElement(material!!.toString(Charsets.UTF_8)).jsonObject
+                val updated=JsonObject(root+mapOf("display_name" to JsonPrimitive(name))).toString().toByteArray()
+                try {
+                    storage?.save(updated)
+                    material?.fill(0);material=updated.clone();flags()
+                }
+                catch(_:Exception) { /* Display metadata must not invalidate a usable login. */ }
+                finally { updated.fill(0) }
+            }
             if(result.readAccepted && freshConfig!=null && preparation.phase in setOf(LivePreparationPhase.MATCHED,LivePreparationPhase.CHANGED))
                 verifiedSchool=VerifiedSchoolConfig(freshConfig!!,savedConfig,currentTime(),revision,runtimeRequirements)
             active=null
