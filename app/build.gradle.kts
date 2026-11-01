@@ -28,8 +28,8 @@ android {
         applicationId = "io.github.ibudaoa"
         minSdk = 29
         targetSdk = 36
-        versionCode = 68
-        versionName = "0.18.2-capture-return"
+        versionCode = 73
+        versionName = "0.19.4-startup-read"
         manifestPlaceholders["amapAndroidKey"] = localMapKey
         buildConfigField("boolean", "MAP_KEY_CONFIGURED", localMapKey.isNotEmpty().toString())
         buildConfigField("String", "REPOSITORY_URL", "\"$localRepositoryUrl\"")
@@ -54,6 +54,8 @@ android {
 
     packaging.resources {
         excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+        excludes += "META-INF/INDEX.LIST" // Desktop JAR lookup indexes are not used by Android.
+        merges += "META-INF/io.netty.versions.properties"
     }
 
     buildTypes {
@@ -81,6 +83,8 @@ dependencies {
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.netty.http)
+    implementation(libs.netty.handler)
     implementation(libs.bouncycastle.provider)
     debugImplementation(libs.compose.ui.tooling)
     testImplementation(libs.junit)

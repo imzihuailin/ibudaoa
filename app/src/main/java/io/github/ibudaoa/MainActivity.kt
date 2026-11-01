@@ -87,7 +87,7 @@ class MainActivity : ComponentActivity() {
                     onClear = model::clearDiagnostic,
                     onMessage = model::showMessage,
                     onMapConsent = model::setMapConsent,
-                    onReconnect = model::continueCapture,
+                    onReconnect = model::reconnectAccount,
                     onAccountReadCheck = model::continueAccountSession,
                     onVerifyAccountSession = model::verifyAccountSession,
                     onDisconnectAccountSession = model::disconnectAccountSession,

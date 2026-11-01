@@ -95,6 +95,7 @@ class CaptureVpnService : VpnService() {
     }
 
     private fun startCollector() {
+        var initializationStage="ACCOUNT"
         try {
             AccountSessionRuntime.initialize(this)
             if (destroyed) return
@@ -104,9 +105,11 @@ class CaptureVpnService : VpnService() {
                 if (destroyed) { AccountSessionRuntime.session.captureEnded(ticket); return }
             }
             Log.i("CaptureStartup", "initializing")
+            initializationStage="CERTIFICATE"
             val certificates = CaptureCertificates(this)
             if (!certificates.isInstalled()) { fail(CaptureProblem.CERTIFICATE); return }
             val context = certificates.serverContext()
+            initializationStage="PROXY"
             val local = ReadOnlyProxy(context, onBeforeRun = onResponse@ { bytes ->
                 if (purpose == CapturePurpose.ACCOUNT_READ_CHECK || destroyed) return@onResponse
                 pendingSchool = try { BeforeRunDecoder.decode(bytes) }
@@ -150,12 +153,15 @@ class CaptureVpnService : VpnService() {
                 }, onBlocked = { kind ->
                 CaptureRuntime.update(generation) { it.copy(blockedRequests = it.blockedRequests + 1,
                     blockedKinds = it.blockedKinds + kind) }
-            }, onProblem = { problem -> report(problem) })
+            }, onProblem = { problem -> report(problem) }, onTrace = { event ->
+                Log.i("CaptureStage", "g=$generation stage=${event.stage.name} code=${event.failure.name} ms=${event.millis}")
+            })
             synchronized(resourceLock) {
                 if (destroyed) { local.close(); return }
                 proxy = local
                 val configure = PendingIntent.getActivity(this, 1, Intent(this, MainActivity::class.java),
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                initializationStage="TUN"
                 tun = Builder().setSession(if (purpose!=CapturePurpose.CONFIG) "ibudaoa 账号只读校验" else "ibudaoa 只读配置采集")
                     .addAddress("10.111.0.2", 32).addRoute("0.0.0.0", 0)
                     .addAllowedApplication(ReadOnlyPolicy.OFFICIAL_PACKAGE)
@@ -188,7 +194,13 @@ class CaptureVpnService : VpnService() {
                     else "请在官方应用打开“我的”页，触发账号资料读取后返回。"
                     else "请在官方应用进入校园跑准备页，不要点击开始；读到配置后返回这里。") }
             local.serve()
-        } catch (_: Exception) { if (!destroyed) fail(CaptureProblem.VPN) }
+        } catch (error: LinkageError) {
+            Log.w("CaptureStartup","initialization_linkage_failed stage=$initializationStage type=${error.javaClass.simpleName}")
+            if (!destroyed) fail(CaptureProblem.VPN)
+        } catch (error: Exception) {
+            Log.w("CaptureStartup","initialization_failed stage=$initializationStage type=${error.javaClass.simpleName} cause=${error.cause?.javaClass?.simpleName ?: "none"}")
+            if (!destroyed) fail(CaptureProblem.VPN)
+        }
     }
 
     private fun report(problem: CaptureProblem) {
@@ -203,7 +215,9 @@ class CaptureVpnService : VpnService() {
         if (purpose == CapturePurpose.ACCOUNT_SESSION && !session.captureReady(sessionTicket)) return
         if (pendingSchool == null && purpose == CapturePurpose.ACCOUNT_SESSION && schoolProbe.compareAndSet(false,true)) {
             try {
-                val transport = AccountReadTransport(maintenance=true)
+                val transport = AccountReadTransport(maintenance=true, trace={event ->
+                    Log.i("CaptureStage","g=$generation stage=${event.stage.name} code=${event.failure.name} ms=${event.millis}")
+                })
                 schoolTransport = transport
                 pendingSchool = session.readCaptureSchool(sessionTicket,transport,System.currentTimeMillis()/1000,
                     100_000+java.security.SecureRandom().nextInt(900_000))

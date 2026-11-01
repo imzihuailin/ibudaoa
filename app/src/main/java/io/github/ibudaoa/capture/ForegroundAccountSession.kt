@@ -295,8 +295,14 @@ internal class ForegroundAccountSession(private val clock:()->Long={System.nanoT
         fun currentTime()=nowSeconds+(System.nanoTime()-started)/1_000_000_000
         fun nextNonce()=100_000+(nonce-100_000+step++).mod(900_000)
         fun accountRead():AccountReadResult {
-            val request=AccountReadProbe.restoreFromStorage(working)
-            return AccountReadProbe.readRetained(request,currentTime(),nextNonce()) { body -> connection.send(request.copy(body=body)) }
+            var result=AccountReadResult(AccountReadOutcome.NETWORK_ERROR)
+            repeat(2) {
+                synchronized(this) { if(ticket!=generation || !foreground || revision!=credentialRevision) return result }
+                val request=AccountReadProbe.restoreFromStorage(working)
+                result=AccountReadProbe.readRetained(request,currentTime(),nextNonce()) { body -> connection.send(request.copy(body=body)) }
+                if(result.outcome!=AccountReadOutcome.NETWORK_ERROR)return result
+            }
+            return result
         }
         fun exchange(request:LocalRequest):ByteArray = try { connection.send(request) } finally { request.body.fill(0) }
         var result=AccountReadResult(AccountReadOutcome.NETWORK_ERROR)

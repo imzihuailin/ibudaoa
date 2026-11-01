@@ -6,7 +6,7 @@ import org.junit.Test
 
 class ReadOnlyPolicyTest {
     @Test fun `only exact audited reads are allowed`() {
-        listOf("Run2/beforeRunV260", "User/User", "Run/GetAllZone", "Run/GetZonePoints").forEach {
+        listOf("System/getIp", "Run2/beforeRunV260", "User/User", "Run/GetAllZone", "Run/GetZonePoints").forEach {
             assertTrue(ReadOnlyPolicy.allows("POST", "/v3/api.php/$it"))
         }
     }

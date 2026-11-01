@@ -134,7 +134,9 @@ internal object AccountProtocol {
         val token=pa["token"];val origin=b.getValue("origin_token").jsonPrimitive.content
         if(token!=origin && token!=pb["token"]) return null
         val combined=a.toMutableMap();combined["umid"]=b.getValue("umid")
-        if(token==origin && pb["token"]!=origin) combined["parameters"]=b.getValue("parameters")
+        // A profile response may contain fewer common fields than the encrypted request.
+        // Bind by uid/device/token first, then use its verified protocol parameters in full.
+        combined["parameters"]=JsonObject((pa+pb).mapValues {JsonPrimitive(it.value)})
         b["refresh_token"]?.let { combined["refresh_token"]=it;combined["refresh_state"]=JsonPrimitive("AVAILABLE") }
         return JsonObject(combined).toString().toByteArray().also {
             val request=AccountReadProbe.restoreFromStorage(it);request.body.fill(0)
@@ -143,7 +145,9 @@ internal object AccountProtocol {
     fun inherit(saved:ByteArray,projected:ByteArray):ByteArray {
         val a=root(saved);val b=root(projected);val pa=params(a);val pb=params(b)
         if(listOf("uid","token","mobileDeviceId").any { pa[it]!=pb[it] }) return projected.clone()
-        return JsonObject(b+a.filterKeys { it in setOf("umid","refresh_token","refresh_state") }).toString().toByteArray()
+        val inherited=b+a.filterKeys {it in setOf("umid","refresh_token","refresh_state")} +
+            ("parameters" to JsonObject((pa+pb).mapValues {JsonPrimitive(it.value)}))
+        return JsonObject(inherited).toString().toByteArray()
     }
     fun rotated(saved:ByteArray,response:ByteArray):ByteArray {
         val r=root(saved);val p=params(r);val data=BeforeRunDecoder.decodeSuccessfulData(response)

@@ -11,6 +11,8 @@ junit = "4.13.2"
 bouncycastle = "1.80.2"
 amap = "11.3.100_loc11.3.101_sea9.8.1"
 
+netty = "4.1.139.Final"
+
 [libraries]
 amap-bundle = { module = "com.amap.api:3dmap-location-search", version.ref = "amap" }
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activity" }
@@ -27,6 +29,9 @@ kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serializa
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
 junit = { module = "junit:junit", version.ref = "junit" }
 bouncycastle-provider = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }
+
+netty-http = { module = "io.netty:netty-codec-http", version.ref = "netty" }
+netty-handler = { module = "io.netty:netty-handler", version.ref = "netty" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

@@ -43,4 +43,9 @@
             </intent-filter>
         </activity>
     </application>
+    <!-- ADB-only local transport smoke check: no account storage or VPN service. -->
+    <instrumentation
+        android:name=".capture.ProxyCompatibilityCheck"
+        android:targetPackage="io.github.ibudaoa"
+        android:label="Local proxy compatibility check" />
 </manifest>

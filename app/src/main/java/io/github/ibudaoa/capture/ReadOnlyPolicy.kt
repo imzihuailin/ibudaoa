@@ -4,9 +4,12 @@ package io.github.ibudaoa.capture
 object ReadOnlyPolicy {
     const val OFFICIAL_PACKAGE = "com.lptiyu.tanke"
     const val HOST = "api2.lptiyu.com"
+    // Official 4.3.1 splash.k.J3 reads RequestIPByDomain before account startup.
+    const val BOOTSTRAP_IP = "/v3/api.php/System/getIp"
     const val BEFORE_RUN = "/v3/api.php/Run2/beforeRunV260"
     const val USER_PROFILE = "/v3/api.php/User/User"
     private val paths = setOf(
+        BOOTSTRAP_IP,
         BEFORE_RUN,
         USER_PROFILE,
         "/v3/api.php/Run/GetAllZone",

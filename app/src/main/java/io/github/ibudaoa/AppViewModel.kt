@@ -30,6 +30,7 @@ import io.github.ibudaoa.capture.CertificateDownloads
 import io.github.ibudaoa.capture.CertificateDownloadRepository
 import io.github.ibudaoa.capture.needsCertificateSetup
 import io.github.ibudaoa.capture.CapturePurpose
+import io.github.ibudaoa.capture.CaptureProblem
 import io.github.ibudaoa.capture.CapturePhase
 import io.github.ibudaoa.capture.CaptureRuntime
 import io.github.ibudaoa.capture.CaptureState
@@ -777,7 +778,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         requestCapture(CapturePurpose.ACCOUNT_SESSION)
     }
 
-    private fun requestCapture(purpose: CapturePurpose) {
+    fun reconnectAccount() {
+        if(automaticTaskOpen())return showMessage("请先核对当前自动任务，原配置会保留。")
+        requestCapture(CapturePurpose.ACCOUNT_SESSION,forceCapture=true)
+    }
+
+    private fun requestCapture(purpose: CapturePurpose, forceCapture:Boolean=false) {
         if (state.value.busy || roadJob != null) return
         if (!state.value.capture.active) requestedCapturePurpose=purpose
         captureFlowActive = true
@@ -790,19 +796,30 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (purpose!=CapturePurpose.ACCOUNT_READ_CHECK) store.acknowledgePreparation()
             // A confirmed retained session can fill school data without reopening a VPN.
-            if (purpose == CapturePurpose.ACCOUNT_SESSION && accountForeground) {
-                val restored = withContext(Dispatchers.IO) {
+            if (purpose == CapturePurpose.ACCOUNT_SESSION && accountForeground && !forceCapture) {
+                val recovery = withContext(Dispatchers.IO) {
                     AccountSessionRuntime.initialize(getApplication())
                     val session = AccountSessionRuntime.session
                     if (accountForeground && certificateGate.accepts(setupGeneration)) session.onForeground()
                     val account = session.state.value
                     if (account.available && account.protocolReady) {
-                        session.read(AccountReadTransport(maintenance=true), Instant.now().epochSecond,
+                        session.read(AccountReadTransport(maintenance=true, trace={event ->
+                            android.util.Log.i("CaptureStage","setup=$setupGeneration stage=${event.stage.name} code=${event.failure.name} ms=${event.millis}")
+                        }), Instant.now().epochSecond,
                             100_000+java.security.SecureRandom().nextInt(900_000),state.value.config)
-                        session.verifiedSchool(Instant.now().epochSecond)
-                    } else null
+                    }
+                    val verified=session.verifiedSchool(Instant.now().epochSecond)
+                    verified to io.github.ibudaoa.capture.AccountRecoveryPolicy.decide(session.state.value,verified!=null)
                 }
                 if (!certificateGate.accepts(setupGeneration) || !captureFlowActive || !accountForeground) return@operation
+                val restored=recovery.first
+                if (recovery.second == io.github.ibudaoa.capture.AccountRecovery.RETRY_READ) {
+                    captureFlowActive=false;certificateGate.cancel()
+                    val failed=CaptureRuntime.begin(purpose)
+                    CaptureRuntime.update(failed) { it.copy(phase=CapturePhase.ERROR,problem=CaptureProblem.NETWORK,
+                        message="账号读取暂未完成，请重试；已有登录和学校资料已保留。") }
+                    return@operation
+                }
                 if (restored != null) {
                     withContext(Dispatchers.IO) { store.save(restored.config,captured=true) }
                     if (!certificateGate.accepts(setupGeneration) || !captureFlowActive) return@operation
@@ -849,6 +866,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val snapshot = state.value
         if (snapshot.busy || roadJob != null) return
         if (snapshot.capture.active) { requestCapture(snapshot.capture.purpose);return }
+        if (snapshot.capture.phase == CapturePhase.ERROR) { requestCapture(requestedCapturePurpose);return }
         if (needsCertificateSetup(snapshot.certificateSetup, snapshot.capturedConfig, snapshot.certificateTrusted, snapshot.capture.active)) {
             requestCapture(requestedCapturePurpose)
             return

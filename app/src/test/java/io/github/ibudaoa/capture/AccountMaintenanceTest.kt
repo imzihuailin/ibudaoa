@@ -341,4 +341,19 @@ class AccountMaintenanceTest {
         assertEquals(1,transport.paths.size)
     }
 
+    @Test fun `verified protocol fills missing common fields and later profile does not erase them`() {
+        val full=f.material()
+        val root=Json.parseToJsonElement(full.toString(Charsets.UTF_8)).jsonObject
+        val values=root.getValue("parameters").jsonObject.filterKeys {it in setOf("uid","token","mobileDeviceId")}
+        val partial=JsonObject(root.filterKeys {it !in setOf("umid","refresh_token","refresh_state")}+
+            ("parameters" to JsonObject(values))).toString().toByteArray()
+        val context=AccountProtocol.capture(AccountProtocol.request(full,ReadOnlyPolicy.BEFORE_RUN,1793000100,654321),f.fresh().toByteArray())
+        assertFalse(AccountProtocol.ready(partial))
+        val merged=AccountProtocol.merge(partial,context)!!
+        assertTrue(AccountProtocol.ready(merged))
+        val inherited=AccountProtocol.inherit(merged,partial)
+        assertTrue(AccountProtocol.ready(inherited))
+        full.fill(0);partial.fill(0);context.fill(0);merged.fill(0);inherited.fill(0)
+    }
+
 }
