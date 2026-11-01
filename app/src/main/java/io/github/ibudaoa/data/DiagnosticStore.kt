@@ -35,11 +35,14 @@ data class PointPlanningStorage(
     val gapEvidence: RoadGapEvidence? = null,
     val manualGaps: ManualRoadGaps? = null,
     val reviewedDirections: ReviewedRoadDirections? = null,
+    val preparationCompleted: Boolean = false,
+    val mapConsent: Boolean = false,
 )
 
 class DiagnosticStore internal constructor(private val store: DataStore<Preferences>) {
     constructor(context: Context) : this(context.applicationContext.diagnosticStore)
     private val configKey = stringPreferencesKey("sanitized_config")
+    private val preparationCompletedKey = booleanPreferencesKey("initial_preparation_completed_v1")
     private val preparationKey = booleanPreferencesKey("foreground_preparation_acknowledged")
     private val capturedKey = booleanPreferencesKey("config_captured_from_official")
     private val epochKey = longPreferencesKey("local_connection_epoch")
@@ -77,8 +80,25 @@ class DiagnosticStore internal constructor(private val store: DataStore<Preferen
             gapEvidence = preferences.readGapEvidence(roads),
             manualGaps = preferences.readManualGaps(roads),
             reviewedDirections = preferences.readDirections(roads),
+            preparationCompleted = preferences[preparationCompletedKey] == true,
+            mapConsent = preferences[mapConsentKey] == true,
             capturedAtEpochSecond = preferences[capturedAtKey] ?: 0,
         )
+    }
+
+    /** Upgrade old installations from complete, scoped evidence before publishing initial UI state. */
+    suspend fun migratePreparationCompletion() {
+        store.edit { preferences ->
+            if (preferences[preparationCompletedKey] != true && preferences.completedRoadPreparation())
+                preferences[preparationCompletedKey] = true
+        }
+    }
+
+    private fun Preferences.completedRoadPreparation(): Boolean {
+        if (get(capturedKey) != true || get(captureRevisionKey) != CURRENT_CAPTURE_REVISION || get(mapConsentKey) != true) return false
+        val config = get(configKey)?.let { runCatching { DiagnosticCodec.decode(it) }.getOrNull() } ?: return false
+        val report = readRoadReport(config)
+        return io.github.ibudaoa.domain.PreparationRoads.ready(config, epoch(), report, readRoadEvidence(config, report))
     }
 
     /** Explicit capture/reconnect/import only; future within-account rule refresh needs a separate API. */
@@ -341,6 +361,7 @@ class DiagnosticStore internal constructor(private val store: DataStore<Preferen
                 preferences[roadEvidenceKey] = evidenceEncoded!!
             } else preferences.remove(roadEvidenceKey)
             preferences[roadReportKey] = encoded
+            if (preferences.completedRoadPreparation()) preferences[preparationCompletedKey] = true
         }
     }
 
@@ -379,6 +400,7 @@ class DiagnosticStore internal constructor(private val store: DataStore<Preferen
     suspend fun clear() { store.edit {
         requireUnlocked(it)
         it[epochKey] = nextEpoch(it.epoch())
+        it.remove(preparationCompletedKey)
         it.remove(configKey); it.remove(capturedKey); it.remove(pointCacheKey)
         it.remove(captureRevisionKey); it.remove(capturedAtKey); it.remove(roadReportKey); it.remove(roadEvidenceKey); it.remove(gapEvidenceKey); it.remove(manualGapsKey); it.remove(reviewedDirectionsKey)
     } }

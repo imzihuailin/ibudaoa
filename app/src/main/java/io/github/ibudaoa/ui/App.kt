@@ -145,7 +145,8 @@ fun IbudaoaApp(
     var showManualGaps by rememberSaveable { mutableStateOf(false) }
     var manualIndex by rememberSaveable { mutableStateOf(0) }
     var destination by rememberSaveable { mutableStateOf(Destination.RUN) }
-    var showWarmup by rememberSaveable { mutableStateOf(true) }
+    var showWarmup by rememberSaveable { mutableStateOf(false) }
+    var handledWarmupReason by rememberSaveable { mutableStateOf<String?>(null) }
     var showSummary by rememberSaveable { mutableStateOf(false) }
     var confirmClear by rememberSaveable { mutableStateOf(false) }
     var showGapCheck by rememberSaveable { mutableStateOf(false) }
@@ -159,20 +160,29 @@ fun IbudaoaApp(
         if (state.loaded && state.locationStartupPending) {
             attemptedLocation = false
             onLocationStartupHandled()
-            finishAfterLocation = state.preparationRoadsReady && (!state.locationGranted || !state.mapConsent)
-            showWarmup = !state.preparationRoadsReady || !state.locationGranted || !state.mapConsent
         }
     }
     val foreground = LocalLifecycleOwner.current.lifecycle.currentStateAsState().value.isAtLeast(Lifecycle.State.RESUMED)
+    val warmupReason = WarmupPolicy.reason(state)
+    LaunchedEffect(warmupReason, foreground, state.accountSession.phase, showWarmup) {
+        if (foreground && warmupReason != null && handledWarmupReason != warmupReason.name) {
+            handledWarmupReason = warmupReason.name
+            finishAfterLocation = warmupReason == WarmupReason.LOCATION && state.preparationRoadsReady
+            showWarmup = true
+        } else if (WarmupPolicy.recovered(state) && !showWarmup) {
+            handledWarmupReason = null
+        }
+    }
     var attemptedRoadScope by rememberSaveable { mutableStateOf<String?>(null) }
     val roadScopeKey = "${state.connectionEpoch}:${state.config.hashCode()}"
-    val automaticStep = PreparationStepResolver.next(state.capturedConfig, state.captureRevision,
+    val automaticStep = PreparationStepResolver.next(state.capturedConfig && !WarmupPolicy.needsLogin(state), state.captureRevision,
         DiagnosticStore.CURRENT_CAPTURE_REVISION, state.capture.active, BuildConfig.MAP_KEY_CONFIGURED,
         state.mapConsent, state.preparationRoadReport?.phase, state.busy,
         state.preparationRoadReport?.reviewRevision ?: io.github.ibudaoa.roads.RoadBatchReport.CURRENT_REVIEW_REVISION,
         state.preparationRoadsReady, state.locationGranted)
     LaunchedEffect(showWarmup, foreground, state.loaded, state.capture.active, state.capturedConfig, state.captureRevision,
-        state.busy, state.mapConsent, state.locationGranted, state.locationStartupPending, state.roadReport, state.certificateSetup, state.preparationError) {
+        state.busy, state.mapConsent, state.locationGranted, state.locationStartupPending, state.roadReport, state.certificateSetup, state.preparationError,
+        state.preparationCompleted, state.accountStorageLoaded, state.accountSession.phase) {
         if (showWarmup && state.loaded && !state.locationStartupPending && foreground && !state.busy && !state.capture.active && state.capture.phase != CapturePhase.ERROR &&
             state.capturedConfig && state.captureRevision == DiagnosticStore.CURRENT_CAPTURE_REVISION &&
             !needsCertificateSetup(state.certificateSetup, state.capturedConfig, state.certificateTrusted, false) &&
@@ -183,13 +193,14 @@ fun IbudaoaApp(
                 attemptedLocation = true
                 if (locationPermission.canRequestAutomatically) locationPermission.request()
             }
-        } else if (showWarmup && state.loaded && foreground && state.locationGranted && state.mapConsent &&
+        } else if ((showWarmup || state.preparationCompleted) && WarmupPolicy.ready(state) && foreground && state.locationGranted && state.mapConsent &&
             !state.busy && !state.capture.active && state.capture.phase != CapturePhase.ERROR &&
             !needsCertificateSetup(state.certificateSetup, state.capturedConfig, state.certificateTrusted, false)) {
             if (finishAfterLocation && state.preparationRoadsReady) {
                 finishAfterLocation = false
                 showWarmup = false
-            } else if (automaticStep == PreparationStep.CHECK_ROADS && attemptedRoadScope != roadScopeKey && state.preparationError == null) {
+            } else if (automaticStep == PreparationStep.CHECK_ROADS && !WarmupPolicy.needsLogin(state) && attemptedRoadScope != roadScopeKey && state.preparationError == null &&
+                state.preparationRoadReport?.phase !in setOf(RoadBatchPhase.FAILED, RoadBatchPhase.INTERRUPTED)) {
                 attemptedRoadScope = roadScopeKey
                 onAcknowledgePreparation()
             }
@@ -359,14 +370,14 @@ fun IbudaoaApp(
             dismissButton = { TextButton(onClick = { showGapCheck = false }) { Text("取消") } })
     }
 
-    if (state.loaded && showWarmup) {
+    if (WarmupPolicy.ready(state) && showWarmup) {
         WarmupDialog(
             state = state,
             onContinue = {
-                if (state.locationGranted && state.mapConsent && state.preparationRoadsReady && !state.busy && !state.capture.active && state.capture.phase != CapturePhase.ERROR &&
+                if (!WarmupPolicy.needsLogin(state) && state.locationGranted && state.mapConsent && state.preparationRoadsReady && !state.busy && !state.capture.active && state.capture.phase != CapturePhase.ERROR &&
                     state.capturedConfig && state.captureRevision == DiagnosticStore.CURRENT_CAPTURE_REVISION) {
                     showWarmup = false
-                } else if (state.capturedConfig && !state.capture.active && (!state.locationGranted || !state.mapConsent) &&
+                } else if (!WarmupPolicy.needsLogin(state) && state.capturedConfig && !state.capture.active && (!state.locationGranted || !state.mapConsent) &&
                     !needsCertificateSetup(state.certificateSetup, state.capturedConfig, state.certificateTrusted, false)) {
                     if (state.locationGranted) onMapConsent(true)
                     else { attemptedLocation = true; locationPermission.request() }
@@ -588,6 +599,14 @@ internal fun MapPage(
                         }
                     }
                 }
+                if (runningPage && state.preparationCompleted) {
+                    val preparationFailure = state.preparationError ?: when (state.preparationRoadReport?.phase) {
+                        RoadBatchPhase.FAILED -> "道路核对未完成，请点击完成准备后重试。"
+                        RoadBatchPhase.INTERRUPTED -> "道路核对已中断，请点击完成准备后重试。"
+                        else -> null
+                    }
+                    preparationFailure?.let { Text(it, color = colors.error) }
+                }
                 if (state.gapChecking) Text("正在检查道路间隔 ${state.gapReport?.outcomes?.size ?: 0}/${state.gapReport?.planned ?: 0}，请保持应用前台。")
                 else state.gapReport?.let { Text("道路间隔检查：${it.outcomes.size}/${it.planned}，结果可导出。") }
                     ?: state.gapEvidence?.let { Text("已保存 ${it.records.size} 处道路间隔结果，可继续检查或导出。") }
@@ -801,7 +820,7 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
     val certificateStep = needsCertificateSetup(setup, state.capturedConfig, state.certificateTrusted, state.capture.active)
     val capture = state.capture
     val roads = state.preparationRoadReport
-    val needsCapture = !state.capturedConfig || state.captureRevision != DiagnosticStore.CURRENT_CAPTURE_REVISION
+    val needsCapture = WarmupPolicy.needsLogin(state) || !state.capturedConfig || state.captureRevision != DiagnosticStore.CURRENT_CAPTURE_REVISION
     val accountReady = !certificateStep && !capture.active && !needsCapture && capture.phase != CapturePhase.ERROR
     val locationStep = accountReady && (!state.locationGranted || !state.mapConsent)
     val roadStep = accountReady && !locationStep
@@ -820,6 +839,7 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
         capture.phase == CapturePhase.ERROR && !roadStep -> capture.message
         !BuildConfig.MAP_KEY_CONFIGURED && roadStep -> "地图服务尚未配置，暂时无法核对道路。"
         locationStep -> "开启定位"
+        WarmupPolicy.needsLogin(state) -> "登录已失效，请重新登录"
         failed -> state.preparationError ?: if (roads?.phase == RoadBatchPhase.INTERRUPTED) "道路核对已中断，请重试。" else "道路核对未完成，请重试。"
         ready -> "道路核对完成"
         else -> "核对道路中……"
@@ -832,6 +852,7 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
             else -> "开始配置"
         }
         locationStep -> "开启定位"
+        WarmupPolicy.needsLogin(state) -> "重新登录"
         failed -> "重试"
         roadStep -> "完成"
         capture.phase == CapturePhase.FINALIZING -> "正在保存…"

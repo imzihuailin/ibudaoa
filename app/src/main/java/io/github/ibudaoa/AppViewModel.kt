@@ -63,6 +63,9 @@ data class AppState(
     val loaded: Boolean = false,
     val config: DiagnosticConfig? = null,
     val preparationAcknowledged: Boolean = false,
+    val preparationCompleted: Boolean = false,
+    val preparationStorageFailed: Boolean = false,
+    val accountStorageLoaded: Boolean = false,
     val busy: Boolean = false,
     val session: SessionState = SessionState(),
     val capturedConfig: Boolean = false,
@@ -173,7 +176,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             AccountSessionRuntime.session.state.collect { session -> mutableState.update { it.copy(accountSession=session) } }
         }
-        viewModelScope.launch { withContext(Dispatchers.IO) { AccountSessionRuntime.initialize(getApplication()) } }
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { AccountSessionRuntime.initialize(getApplication()) }
+            mutableState.update { it.copy(accountStorageLoaded = true, accountSession = AccountSessionRuntime.session.state.value) }
+        }
         viewModelScope.launch {
             automaticJournalPending=withContext(Dispatchers.IO) { runCatching { automaticJournal.load()?.let { bytes -> bytes.fill(0);true } ?: false }.getOrDefault(true) }
             automaticJournalChecked=true
@@ -195,12 +201,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             try {
-                store.mapConsent.collect { agreed -> mutableState.update { it.copy(mapConsent = agreed) } }
-            } catch (e: CancellationException) { throw e }
-            catch (_: Exception) { showMessage("地图授权状态读取失败，暂不启用地图。") }
-        }
-        viewModelScope.launch {
-            try {
+                store.migratePreparationCompletion()
                 combine(store.pointPlanningStorage, store.preparationAcknowledged) { snapshot, acknowledged ->
                     snapshot to acknowledged
                 }.collectLatest { (snapshot, acknowledged) ->
@@ -211,6 +212,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         val sameRoads = same && it.roadEvidence == snapshot.roadEvidence && it.manualGaps == snapshot.manualGaps &&
                             it.gapEvidence == snapshot.gapEvidence && it.reviewedDirections == snapshot.reviewedDirections
                         it.copy(loaded = true, config = snapshot.config, preparationAcknowledged = acknowledged,
+                            preparationCompleted = snapshot.preparationCompleted, preparationStorageFailed = false, mapConsent = snapshot.mapConsent,
                             runningPlanSummary=if(sameRoads || preparingRun || it.runningPlanSummary.phase==RunningPlanPhase.IDLE)it.runningPlanSummary
                                 else it.runningPlanSummary.copy(phase=RunningPlanPhase.INTERRUPTED,problem=RunningPlanProblem.CONFIGURATION_CHANGED),
                             capturedConfig = snapshot.captured, connectionEpoch = snapshot.connectionEpoch,
@@ -257,7 +259,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } catch (e: CancellationException) { throw e }
             catch (_: Exception) {
-                mutableState.update { it.copy(loaded = true) }
+                mutableState.update { it.copy(loaded = true, preparationStorageFailed = true) }
                 messages.send("本地准备状态读取失败，请重新打开应用后重试。")
             }
         }
@@ -915,6 +917,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (needsCertificateSetup(snapshot.certificateSetup, snapshot.capturedConfig, snapshot.certificateTrusted, snapshot.capture.active)) {
             requestCapture(requestedCapturePurpose)
             return
+        }
+        if (snapshot.accountSession.phase == io.github.ibudaoa.capture.AccountSessionPhase.RECONNECT_REQUIRED ||
+            snapshot.preparationCompleted && snapshot.accountStorageLoaded && snapshot.accountSession.phase in setOf(
+                io.github.ibudaoa.capture.AccountSessionPhase.EMPTY, io.github.ibudaoa.capture.AccountSessionPhase.CLEARED,
+                io.github.ibudaoa.capture.AccountSessionPhase.FAILED)) {
+            continueCapture();return
         }
         if (snapshot.preparationRoadsReady) return
         if (!snapshot.manualGaps?.indices.isNullOrEmpty() || !snapshot.reviewedDirections?.reversible.isNullOrEmpty())

@@ -31,6 +31,48 @@ import org.junit.Test
 import io.github.ibudaoa.roads.*
 
 class DiagnosticStoreTest {
+    @Test fun `complete preparation persists and clear requires first setup again`() = runBlocking {
+        val backend = MemoryStore(); val store = DiagnosticStore(backend)
+        store.save(RoadFixture.config(), captured = true)
+        store.setMapConsent(true)
+        store.acknowledgePreparation()
+        store.migratePreparationCompletion()
+        assertFalse(store.pointPlanningStorage.first().preparationCompleted)
+        val snapshot = store.pointPlanningStorage.first()
+        val plan = RoadBatchPlan.create(snapshot.config!!, snapshot.connectionEpoch)
+        val report = RoadBatchReport(plan.scope, RoadBatchPhase.COMPLETE, plan.candidateCount,
+            plan.requests.size, plan.requests.map { RoadLinkSummary(it.fromId, it.toId) })
+        val evidence = RoadEvidenceSnapshot(plan.scope, plan.requests.map {
+            CandidateRoadEvidence(it.fromId, it.toId, WalkingLeg(100.0, listOf(listOf(it.from, it.to))))
+        })
+        store.saveRoadCheck(report, evidence)
+        assertTrue(DiagnosticStore(backend).pointPlanningStorage.first().preparationCompleted)
+        store.clear()
+        assertFalse(DiagnosticStore(backend).pointPlanningStorage.first().preparationCompleted)
+    }
+
+    @Test fun `upgrade migrates complete old evidence but not summary alone`() = runBlocking {
+        val backend = MemoryStore(); val store = DiagnosticStore(backend)
+        store.save(RoadFixture.config(), captured = true); store.setMapConsent(true)
+        val snapshot = store.pointPlanningStorage.first()
+        val plan = RoadBatchPlan.create(snapshot.config!!, snapshot.connectionEpoch)
+        val report = RoadBatchReport(plan.scope, RoadBatchPhase.COMPLETE, plan.candidateCount,
+            plan.requests.size, plan.requests.map { RoadLinkSummary(it.fromId, it.toId) })
+        val evidence = RoadEvidenceSnapshot(plan.scope, plan.requests.map {
+            CandidateRoadEvidence(it.fromId, it.toId, WalkingLeg(100.0, listOf(listOf(it.from, it.to))))
+        })
+        val completedKey = androidx.datastore.preferences.core.booleanPreferencesKey("initial_preparation_completed_v1")
+        store.saveRoadCheck(report, evidence)
+        backend.edit { it.remove(completedKey) } // Previous release has no completion flag.
+        val upgraded = DiagnosticStore(backend)
+        upgraded.migratePreparationCompletion()
+        assertTrue(upgraded.pointPlanningStorage.first().preparationCompleted)
+        backend.edit { it.remove(completedKey) }
+        store.saveRoadReport(report)
+        upgraded.migratePreparationCompletion()
+        assertFalse(upgraded.pointPlanningStorage.first().preparationCompleted)
+    }
+
     @Test fun `map consent defaults off persists separately and can be revoked`() = runBlocking {
         val backend = MemoryStore()
         val store = DiagnosticStore(backend)
