@@ -93,21 +93,5 @@ internal class AndroidRunTaskJournal(private val context:Context):RunTaskJournal
         val archives=dir.listFiles().orEmpty().filter { it.name.matches(Regex("run-result-[a-f0-9-]{36}\\.aead")) }.sortedByDescending { it.lastModified() }
         archives.filter { it.name != destination.baseFile.name }.drop(2).forEach { check(it.delete() || !it.exists()) { "Result archive rotation failed" } }
     }
-    /** Preserve a sealed audit copy before the user explicitly retires the local unresolved slot. */
-    @Synchronized fun archiveManuallyReviewed() {
-        val plain=load() ?: error("No task to archive")
-        try {
-            val root=kotlinx.serialization.json.Json.parseToJsonElement(plain.toString(Charsets.UTF_8)) as kotlinx.serialization.json.JsonObject
-            val id=java.util.UUID.fromString((root["task"] as kotlinx.serialization.json.JsonPrimitive).content).toString()
-            val destination=AtomicFile(File(file.baseFile.parentFile,"run-task-reviewed-$id.aead"))
-            check(destination.baseFile.exists() || file.baseFile.parentFile!!.listFiles().orEmpty().count { it.name.startsWith("run-task-reviewed-") }<8) { "Reviewed task archive is full" }
-            val marked=kotlinx.serialization.json.JsonObject(root+mapOf("manual_review" to kotlinx.serialization.json.JsonPrimitive("USER_REPORTED_NO_RECORD"))).toString().toByteArray()
-            val sealed=try { RunTaskJournalCipher.seal(marked,key(false)) } finally { marked.fill(0) }
-            var output:java.io.FileOutputStream?=null
-            try { output=destination.startWrite();output.write(sealed);destination.finishWrite(output);output=null }
-            catch(e:Exception) { output?.let(destination::failWrite);throw e }
-            finally { sealed.fill(0) }
-        } finally { plain.fill(0) }
-    }
     companion object { private const val ALIAS="ibudaoa.run-task.aes.v1" }
 }

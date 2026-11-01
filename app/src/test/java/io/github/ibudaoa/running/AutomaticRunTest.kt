@@ -84,16 +84,20 @@ class AutomaticRunTest {
         val h=Harness();h.credentialOnly=true;h.complete()
         assertEquals(AutomaticRunPhase.VALID,h.controller.summary.phase)
         assertEquals(RunFinishStage.FINISH_RESPONSE,h.ledger.finishStage())
-        assertFalse(h.ledger.canArchiveAfterManualNoRecord())
+        assertFalse(h.ledger.canResolveFinishUnknown())
+        assertFalse(h.ledger.canDiscardUnverifiable())
     }
     @Test fun `manual archive eligibility preserves uncertain registration and bound records`()=runBlocking {
         val failed=Harness();failed.fail=RunEndpoint.FINISH;assertTrue(failed.controller.start())
         failed.clock+=40_000;failed.controller.tick()
-        assertTrue(failed.ledger.canArchiveAfterManualNoRecord())
+        assertTrue(failed.ledger.canResolveFinishUnknown())
+        assertFalse(failed.ledger.canDiscardUnverifiable())
         assertEquals(RunFinishStage.FINISH_REQUEST,failed.ledger.finishStage())
         val registration=Harness();registration.fail=RunEndpoint.REGISTER;assertFalse(registration.controller.start())
-        assertFalse(registration.ledger.canArchiveAfterManualNoRecord())
-        val complete=Harness();complete.complete();assertFalse(complete.ledger.canArchiveAfterManualNoRecord())
+        assertTrue(registration.ledger.canDiscardUnverifiable())
+        assertFalse(registration.ledger.canResolveFinishUnknown())
+        val complete=Harness();complete.complete();assertFalse(complete.ledger.canResolveFinishUnknown())
+        assertFalse(complete.ledger.canDiscardUnverifiable())
     }
     @Test fun `external document UI waits for execution but remains available for unresolved results`() {
         for(phase in AutomaticRunPhase.entries)assertEquals(phase.name,

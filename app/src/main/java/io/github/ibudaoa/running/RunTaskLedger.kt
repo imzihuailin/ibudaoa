@@ -153,8 +153,31 @@ internal class RunTaskLedger private constructor(private val journal:RunTaskJour
     }
     @Synchronized fun materialProblem():RunMaterialProblem? = RunMaterialProblem.entries.firstOrNull { it.name==text("material_problem") }
     @Synchronized fun finishStage():RunFinishStage? = text("finish_stage")?.let { RunFinishStage.valueOf(it) }
-    @Synchronized fun canArchiveAfterManualNoRecord():Boolean = !closed && !storageFailed && foreground &&
-        summary.phase==RunTaskPhase.WRITE_UNCERTAIN && text("pending")==RunWrite.FINISH.name && number("start")!=null && number("record")==null
+    /** A run that never bound a record and never sent a finish write cannot be reconciled at all; only local state is lost. */
+    @Synchronized fun canDiscardUnverifiable():Boolean = !closed && !storageFailed && foreground &&
+        number("record")==null && text("pending")!=RunWrite.FINISH.name
+    @Synchronized fun discardUnverifiable() {
+        check(canDiscardUnverifiable())
+        journal.clear();closed=true
+    }
+    /** The finish write may already have produced a record, so only the user can decide after checking the official client. */
+    @Synchronized fun canResolveFinishUnknown():Boolean = !closed && !storageFailed && foreground &&
+        number("record")==null && text("pending")==RunWrite.FINISH.name &&
+        summary.phase in setOf(RunTaskPhase.WRITE_UNCERTAIN,RunTaskPhase.INTERRUPTED)
+    @Synchronized fun discardFinishUnknown() {
+        check(canResolveFinishUnknown())
+        journal.clear();closed=true
+    }
+    /** Keeps an encrypted copy carrying the user's own observation; never a platform verdict. */
+    @Synchronized fun archiveUserReportedValid() {
+        check(canResolveFinishUnknown())
+        val minimal = JsonObject(checkpoint.filterKeys { it in setOf("schema", "task", "phase", "execution_mode", "account", "school", "term", "zone", "points", "start", "record", "finish_stage", "server_status", "server_points", "failure_reason", "identity_checks", "last_verdict", "verdict_source") }
+            + mapOf("phase" to JsonPrimitive(RunTaskPhase.VALID.name),
+                "verdict_source" to JsonPrimitive("USER_REPORTED"),
+                "last_verdict" to JsonPrimitive(RunRecordVerdict.VALID.name))).toString().toByteArray()
+        try { journal.archiveResolved(minimal) } finally { minimal.fill(0) }
+        journal.clear();closed=true
+    }
     @Synchronized fun pendingWrite():RunWrite? = text("pending")?.let { RunWrite.valueOf(it) }
     @Synchronized fun serverPointCount():Int? = number("server_points")?.toInt()
     @Synchronized fun identityChecks(): Map<String, RecordFieldCheck> =

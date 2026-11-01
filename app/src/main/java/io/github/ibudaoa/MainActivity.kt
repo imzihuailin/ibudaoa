@@ -168,7 +168,8 @@ class MainActivity : ComponentActivity() {
                             onFinishAutomatic = model::finishAutomatic,
                             onAutomaticComplete = model::completeAutomatic,
                             onDismissAutomaticNotice = model::dismissAutomaticNotice,
-                            onArchiveAutomatic = model::archiveManuallyReviewedAutomatic,
+                            onArchiveConfirmedAutomatic = model::archiveConfirmedAutomatic,
+                            onDiscardUnconfirmedAutomatic = model::discardUnconfirmedAutomatic,
                             onCheckUpdates = model::checkUpdates,
                             onCancelCapture = {
                                 model.cancelCapture()

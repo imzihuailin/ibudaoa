@@ -151,6 +151,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val automaticJournal=AndroidRunTaskJournal(application)
     private var automaticJournalPending=false
     private var automaticJournalChecked=false
+    private var finishUnknownNotified=false
+    private var restoreNoticeShown=false
     private var preparingRun=false
     private var runGrant:VerifiedSchoolConfig?=null
     private var preparedRunningPlan:RunningPlan?=null
@@ -185,8 +187,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             automaticJournalPending=withContext(Dispatchers.IO) { runCatching { automaticJournal.load()?.let { bytes -> bytes.fill(0);true } ?: false }.getOrDefault(true) }
             automaticJournalChecked=true
-            if(automaticJournalPending)mutableState.update { it.copy(session=SessionState(io.github.ibudaoa.domain.SessionPhase.INTERRUPTED,needsReconciliation=true),
-                automaticRun=AutomaticRunSummary(AutomaticRunPhase.INTERRUPTED,problem="SAVED_TASK_REQUIRES_RECONCILIATION")) }
+            if(automaticJournalPending) {
+                mutableState.update { it.copy(session=SessionState(io.github.ibudaoa.domain.SessionPhase.INTERRUPTED,needsReconciliation=true),
+                    automaticRun=AutomaticRunSummary(AutomaticRunPhase.INTERRUPTED,problem="SAVED_TASK_REQUIRES_RECONCILIATION")) }
+                reconcilePendingAutomatic()
+            }
         }
 
         viewModelScope.launch {
@@ -459,7 +464,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             when(existing.summary.phase) {
                 AutomaticRunPhase.RUNNING -> { existing.pause();publishAutomatic();return }
                 AutomaticRunPhase.PAUSED -> { existing.resume();publishAutomatic();return }
-                AutomaticRunPhase.AWAITING_VERDICT,AutomaticRunPhase.INTERRUPTED -> { queryAutomatic();return }
+                AutomaticRunPhase.AWAITING_VERDICT -> { queryAutomatic();return }
+                AutomaticRunPhase.INTERRUPTED -> { resolveInterruptedAutomatic(existing);return }
                 AutomaticRunPhase.VALID,AutomaticRunPhase.INVALID -> {
                     if(automaticJournalPending) {
                         mutableState.update { it.copy(busy=true) }
@@ -473,7 +479,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 else -> return
             }
         }
-        if(automaticJournalPending)return restoreAutomaticResult()
+        if(automaticJournalPending)return reconcileAutomaticJournal()
         val snapshot=state.value
         if(snapshot.busy || snapshot.capture.active || automaticJob?.isActive==true || !lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))return
         val plan=preparedRunningPlan ?: return blockRunningPlan(RunningPlanProblem.PLAN_FAILED)
@@ -657,10 +663,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun onAutomaticForegroundReturned() {
         val controller=automaticController
         if(controller!=null || automaticJournalPending)AccountSessionRuntime.session.onForeground()
-        if(controller!=null && controller.summary.recordBound &&
-            controller.summary.phase in setOf(AutomaticRunPhase.AWAITING_VERDICT,AutomaticRunPhase.INTERRUPTED)) {
-            controller.returned();publishAutomatic();ensureAutomaticVerification()
+        if(controller!=null) {
+            if(controller.summary.phase in setOf(AutomaticRunPhase.AWAITING_VERDICT,AutomaticRunPhase.INTERRUPTED)) {
+                controller.returned();publishAutomatic()
+                if(controller.summary.phase==AutomaticRunPhase.INTERRUPTED) resolveInterruptedAutomatic(controller)
+                else ensureAutomaticVerification()
+            }
+            return
         }
+        reconcilePendingAutomatic()
     }
     fun interruptAutomatic() {
         val controller=automaticController
@@ -669,73 +680,138 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         runCatching { controller.interrupt() };automaticJob?.cancel();publishAutomatic()
         AccountSessionRuntime.session.onBackground()
     }
-    fun archiveManuallyReviewedAutomatic() {
-        if(state.value.busy || automaticJob?.isActive==true)return
-        mutableState.update { it.copy(busy=true) }
-        automaticJob=viewModelScope.launch {
-            try {
-                withContext(Dispatchers.IO) { AccountSessionRuntime.initialize(getApplication()) }
-                val account=AccountSessionRuntime.session.runAccountId() ?: error("Account unavailable")
-                val ledger=withContext(Dispatchers.IO) { RunTaskLedger.restore(automaticJournal,account) } ?: error("No pending task")
-                ledger.foreground();check(ledger.canArchiveAfterManualNoRecord())
-                withContext(Dispatchers.IO) { automaticJournal.archiveManuallyReviewed() }
-                store.pointPlanningStorage.first().cache?.takeIf { it.locked }?.let { store.releaseResolvedPointCache(it) }
-                withContext(Dispatchers.IO) { automaticJournal.clear() }
-                automaticJournalPending=false;automaticController=null;preparedRunningPlan=null;runGrant=null
-                mutableState.update { it.copy(automaticRun=AutomaticRunSummary(),automaticRoute=null,automaticPosition=null,automaticFailureReason=null,
-                    session=SessionState(),runningPlanSummary=RunningPlanSummary(),localPreview=null) }
-                showMessage("已归档本地待核对任务，未删除平台记录，也没有重传结束请求。")
-            } catch(_:Exception) { showMessage("本地任务未能归档，原任务和配置已保留。请导出诊断。") }
-            finally { mutableState.update { it.copy(busy=false) };if(automaticJob===currentCoroutineContext()[Job])automaticJob=null }
-        }
-    }
-    private fun queryAutomatic() {
-        val controller=automaticController ?: return
+    /** The finish write may already have produced a record, so the user decides after checking the official client. */
+    fun discardUnconfirmedAutomatic() = resolveUnconfirmedFinish(discard=true)
+    fun archiveConfirmedAutomatic() = resolveUnconfirmedFinish(discard=false)
+    private fun resolveUnconfirmedFinish(discard:Boolean) {
         if(state.value.busy || automaticJob?.isActive==true)return
         automaticJob=viewModelScope.launch {
             mutableState.update { it.copy(busy=true) }
             try {
+                val ledger=automaticController?.ledger ?: openRestoredLedger()
+                if(ledger==null) { clearAutomaticState();return@launch }
+                ledger.foreground()
+                if(!ledger.canResolveFinishUnknown()) { showMessage("任务状态已变化，请重新打开应用后再试。");return@launch }
+                withContext(Dispatchers.IO) { if(discard) ledger.discardFinishUnknown() else ledger.archiveUserReportedValid() }
+                releasePointLock()
+                clearAutomaticState()
+                showMessage(if(discard) "本次本地任务已丢弃，平台记录未改动。"
+                    else "已按你确认有效的结果归档本次本地任务。")
+            } catch(_:Exception) { showMessage("本地任务未能处理，请重试或导出诊断。") }
+            finally { mutableState.update { it.copy(busy=false) };if(automaticJob===currentCoroutineContext()[Job])automaticJob=null }
+        }
+    }
+    /** No record was bound and no finish write was sent, so nothing can ever be verified: drop it instead of blocking. */
+    private fun resolveInterruptedAutomatic(controller:AutomaticRunController) {
+        val summary=controller.summary
+        when {
+            summary.recordBound -> queryAutomatic()
+            summary.pendingWrite==RunWrite.FINISH.name -> publishUnconfirmedFinish()
+            else -> discardInterruptedAutomatic(controller)
+        }
+    }
+    private fun discardInterruptedAutomatic(controller:AutomaticRunController) {
+        if(state.value.busy || automaticJob?.isActive==true)return
+        automaticJob=viewModelScope.launch {
+            mutableState.update { it.copy(busy=true) }
+            try {
+                controller.ledger.foreground()
+                if(!controller.ledger.canDiscardUnverifiable()) { showMessage("任务状态已变化，请重新打开应用后再试。");return@launch }
+                withContext(Dispatchers.IO) { controller.ledger.discardUnverifiable() }
+                releasePointLock();clearAutomaticState()
+                showMessage("本次中断的任务已丢弃，平台记录未改动。")
+            } catch(_:Exception) { showMessage("本地任务未能丢弃，请稍后重试。") }
+            finally { mutableState.update { it.copy(busy=false) };if(automaticJob===currentCoroutineContext()[Job])automaticJob=null }
+        }
+    }
+    private fun publishUnconfirmedFinish() {
+        mutableState.update { it.copy(automaticRun=it.automaticRun.copy(phase=AutomaticRunPhase.INTERRUPTED,
+            recordBound=false,pendingWrite=RunWrite.FINISH.name,problem="RECORD_UNCONFIRMED")) }
+        if(!finishUnknownNotified) { finishUnknownNotified=true;showMessage("无法确定记录是否有效，请去步道乐跑确认") }
+    }
+    private fun reconcilePendingAutomatic() {
+        if(!automaticJournalChecked || !automaticJournalPending || !accountForeground)return
+        if(state.value.busy || automaticJob?.isActive==true)return
+        reconcileAutomaticJournal()
+    }
+    private fun reconcileAutomaticJournal() {
+        if(state.value.busy || automaticJob?.isActive==true)return
+        automaticJob=viewModelScope.launch {
+            mutableState.update { it.copy(busy=true) }
+            try {
+                val ledger=openRestoredLedger() ?: return@launch
+                publishRestoredSummary(ledger)
+                when {
+                    ledger.summary.recordBound -> verifyRestoredRecord(ledger)
+                    ledger.canResolveFinishUnknown() -> publishUnconfirmedFinish()
+                    ledger.canDiscardUnverifiable() -> {
+                        withContext(Dispatchers.IO) { ledger.discardUnverifiable() }
+                        releasePointLock();clearAutomaticState()
+                        showMessage("上次中断的任务已丢弃，平台记录未改动。")
+                    }
+                    else -> showMessage("保存的自动任务尚未核对，请导出诊断。")
+                }
+            } catch(_:Exception) {
+                if(!restoreNoticeShown) { restoreNoticeShown=true;showMessage("保存的自动任务尚未核对，请导出诊断。") }
+            }
+            finally { mutableState.update { it.copy(busy=false) };if(automaticJob===currentCoroutineContext()[Job])automaticJob=null }
+        }
+    }
+    private suspend fun openRestoredLedger():RunTaskLedger? {
+        if(!automaticJournalPending)return null
+        withContext(Dispatchers.IO) { AccountSessionRuntime.initialize(getApplication()) }
+        val account=AccountSessionRuntime.session.runAccountId() ?: error("Account unavailable")
+        val ledger=withContext(Dispatchers.IO) { RunTaskLedger.restore(automaticJournal,account) }
+        if(ledger==null) { clearAutomaticState();return null }
+        ledger.foreground();return ledger
+    }
+    private suspend fun releasePointLock() {
+        store.pointPlanningStorage.first().cache?.takeIf { it.locked }?.let { store.releaseResolvedPointCache(it) }
+    }
+    private fun clearAutomaticState() {
+        automaticController=null;automaticJournalPending=false;preparedRunningPlan=null;runGrant=null
+        finishUnknownNotified=false;restoreNoticeShown=false
+        mutableState.update { it.copy(automaticRun=AutomaticRunSummary(),automaticFailureReason=null,automaticNotice=null,
+            automaticRoute=null,automaticPosition=null,session=SessionState(),runningPlanSummary=RunningPlanSummary(),
+            localPreview=null,previewPoints=null,previewSummary=null,routeResult=null) }
+    }
+    private fun publishRestoredSummary(ledger:RunTaskLedger) {
+        mutableState.update { it.copy(automaticRun=it.automaticRun.copy(platformStarted=ledger.summary.platformStarted,recordBound=ledger.summary.recordBound,pendingWrite=ledger.pendingWrite()?.name,finishStage=ledger.finishStage(),identityChecks=ledger.identityChecks(),
+            ruleProblems=ledger.completionChecks(),acknowledgedPoints=ledger.acknowledgedPoints(),
+            problem=ledger.materialProblem()?.let { "MATERIAL_${it.name}" } ?: ledger.lastVerdict()?.let { "RECORD_$it" })) }
+    }
+    private fun queryAutomatic() {
+        val controller=automaticController ?: return
+        if(state.value.busy || automaticJob?.isActive==true)return
+        if(!controller.summary.recordBound) { resolveInterruptedAutomatic(controller);return }
+        automaticJob=viewModelScope.launch {
+            mutableState.update { it.copy(busy=true) }
+            try {
                 controller.returned()
-                if(!controller.summary.recordBound) { showMessage("尚未取得上次任务的具体记录，不能重开或恢复推进。请导出诊断。");return@launch }
                 controller.query();publishAutomatic();releaseAutomaticIfResolved()
             }
             catch(_:Exception) { showMessage("平台记录尚未核对完成，请保留当前任务。") }
             finally { mutableState.update { it.copy(busy=false) };if(automaticJob===currentCoroutineContext()[Job])automaticJob=null }
         }
     }
-    private fun restoreAutomaticResult() {
-        if(state.value.busy)return
-        automaticJob=viewModelScope.launch {
-            mutableState.update { it.copy(busy=true) }
-            try {
-                withContext(Dispatchers.IO) { AccountSessionRuntime.initialize(getApplication()) }
-                val account=AccountSessionRuntime.session.runAccountId() ?: error("Account unavailable")
-                val ledger=withContext(Dispatchers.IO) { RunTaskLedger.restore(automaticJournal,account) } ?: error("No pending task")
-                ledger.foreground()
-                mutableState.update { it.copy(automaticRun=it.automaticRun.copy(platformStarted=ledger.summary.platformStarted,recordBound=ledger.summary.recordBound,pendingWrite=ledger.pendingWrite()?.name,finishStage=ledger.finishStage(),identityChecks=ledger.identityChecks(),
-                    ruleProblems=ledger.completionChecks(),acknowledgedPoints=ledger.acknowledgedPoints(),
-                    problem=ledger.materialProblem()?.let { "MATERIAL_${it.name}" } ?: ledger.lastVerdict()?.let { "RECORD_$it" })) }
-                if(!ledger.summary.recordBound) { showMessage("上次自动任务结果尚未确认，暂不能重开或恢复推进。请导出诊断。");return@launch }
-                val context=ledger.requestContext()
-                val gateway=io.github.ibudaoa.capture.RunRecordReader(AccountSessionRuntime.session)
-                val body=gateway.record(context,ledger.expectedRecord())
-                val result=try { ledger.verifyRecord(body) } finally { body.fill(0) }
-                mutableState.update { it.copy(
-                    automaticFailureReason=ledger.failureReasonForDisplay(),
-                    automaticRun=it.automaticRun.copy(identityChecks=ledger.identityChecks(),problem="RECORD_${result.verdict.name}",
-                        serverPointCount=ledger.serverPointCount(),serverStatus=ledger.serverRecordStatus())) }
-                if(result.identityMatched && result.verdict in setOf(RunRecordVerdict.VALID,RunRecordVerdict.INVALID)) {
-                    withContext(Dispatchers.IO) {
-                        ledger.archiveResolved()
-                    }
-                    store.pointPlanningStorage.first().cache?.takeIf { it.locked }?.let { store.releaseResolvedPointCache(it) }
-                    withContext(Dispatchers.IO) { ledger.releaseResolved() };automaticJournalPending=false
-                    mutableState.update { it.copy(session=SessionState(if(result.platformValid)io.github.ibudaoa.domain.SessionPhase.VALID else io.github.ibudaoa.domain.SessionPhase.INVALID),
-                        automaticRun=it.automaticRun.copy(phase=if(result.platformValid)AutomaticRunPhase.VALID else AutomaticRunPhase.INVALID,recordBound=true,recordVerified=true)) }
-                } else showMessage("具体记录判定尚未确认，请保留任务并导出诊断。")
-            } catch(_:Exception) { showMessage("保存的自动任务尚未核对，请导出诊断。") }
-            finally { mutableState.update { it.copy(busy=false) };if(automaticJob===currentCoroutineContext()[Job])automaticJob=null }
-        }
+    private suspend fun verifyRestoredRecord(ledger:RunTaskLedger) {
+        val context=ledger.requestContext()
+        val gateway=io.github.ibudaoa.capture.RunRecordReader(AccountSessionRuntime.session)
+        val body=gateway.record(context,ledger.expectedRecord())
+        val result=try { ledger.verifyRecord(body) } finally { body.fill(0) }
+        mutableState.update { it.copy(
+            automaticFailureReason=ledger.failureReasonForDisplay(),
+            automaticRun=it.automaticRun.copy(identityChecks=ledger.identityChecks(),problem="RECORD_${result.verdict.name}",
+                serverPointCount=ledger.serverPointCount(),serverStatus=ledger.serverRecordStatus())) }
+        if(result.identityMatched && result.verdict in setOf(RunRecordVerdict.VALID,RunRecordVerdict.INVALID)) {
+            withContext(Dispatchers.IO) {
+                ledger.archiveResolved()
+            }
+            store.pointPlanningStorage.first().cache?.takeIf { it.locked }?.let { store.releaseResolvedPointCache(it) }
+            withContext(Dispatchers.IO) { ledger.releaseResolved() };automaticJournalPending=false
+            mutableState.update { it.copy(session=SessionState(if(result.platformValid)io.github.ibudaoa.domain.SessionPhase.VALID else io.github.ibudaoa.domain.SessionPhase.INVALID),
+                automaticRun=it.automaticRun.copy(phase=if(result.platformValid)AutomaticRunPhase.VALID else AutomaticRunPhase.INVALID,recordBound=true,recordVerified=true)) }
+        } else showMessage("具体记录判定尚未确认，请保留任务并导出诊断。")
     }
 
     fun prepareLocalPreview() {

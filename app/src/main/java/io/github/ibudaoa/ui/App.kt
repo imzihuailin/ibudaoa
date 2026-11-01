@@ -167,7 +167,8 @@ fun IbudaoaApp(
     onFinishAutomatic: () -> Unit,
     onAutomaticComplete: () -> Unit,
     onDismissAutomaticNotice: () -> Unit,
-    onArchiveAutomatic: () -> Unit,
+    onDiscardUnconfirmedAutomatic: () -> Unit,
+    onArchiveConfirmedAutomatic: () -> Unit,
     onCheckUpdates: () -> Unit,
     onDiagnosticMode: (Boolean) -> Unit,
 ) {
@@ -276,7 +277,8 @@ fun IbudaoaApp(
                     onAutomaticAction = onAutomaticAction,
                     onFinishAutomatic = onFinishAutomatic,
                     onAutomaticComplete = onAutomaticComplete,
-                    onArchiveAutomatic = onArchiveAutomatic,
+                    onArchiveAutomatic = onArchiveConfirmedAutomatic,
+                    onDiscardAutomatic = onDiscardUnconfirmedAutomatic,
                     mapActive = !showWarmup && !showSummary && !confirmClear && !showGapCheck && !showManualGaps && !showRoadDirections && !state.capture.active,
                 )
                 Destination.SETTINGS -> SettingsPage(
@@ -540,16 +542,12 @@ internal fun MapPage(
     onFinishAutomatic: () -> Unit,
     onAutomaticComplete: () -> Unit,
     onArchiveAutomatic: () -> Unit,
+    onDiscardAutomatic: () -> Unit,
     mapActive: Boolean,
     mapBackground: (@Composable () -> Unit)? = null,
 ) {
     val roads = rememberRoadPreparation(state)
     var expanded by remember { mutableStateOf(false) }
-    var confirmArchive by rememberSaveable { mutableStateOf(false) }
-    if(confirmArchive)AlertDialog(onDismissRequest={confirmArchive=false},title={Text("归档本地待核对任务？")},
-        text={Text("仅在你已核对官方客户端、确认没有对应记录时使用。原结束请求仍可能被延迟处理；归档不会删除平台记录，也不会重传原任务。本地加密日志会保留，归档后可重新准备。")},
-        confirmButton={TextButton(onClick={confirmArchive=false;onArchiveAutomatic()}) { Text("已核对无记录，归档") }},
-        dismissButton={TextButton(onClick={confirmArchive=false}) { Text("保留任务") }})
     val colors = MaterialTheme.colorScheme
     Box(Modifier.fillMaxSize().background(colors.background)) {
         // The SDK is constructed only after a developer key and actual user consent exist.
@@ -709,18 +707,31 @@ internal fun MapPage(
                                 auto.problem in setOf("WRITE_RESULT_UNCERTAIN","ASSOCIATION_UNCERTAIN") -> "请求结果尚未确认，请先核对原任务。"
                                 auto.problem=="RECORD_MISMATCH" -> "返回记录与本次任务不匹配，尚未确认判定。"
                                 auto.problem=="RECORD_QUERY_FAILED" -> "暂未取得平台判定，请稍后核对。"
+                                auto.problem=="RECORD_UNCONFIRMED" -> "结束请求结果未知，请先在步道乐跑核对。"
                                 else -> null
                             }
                             issue?.let { Text(it,style=MaterialTheme.typography.bodySmall) }
                         }
                     }
-                    if(auto.phase==io.github.ibudaoa.running.AutomaticRunPhase.INTERRUPTED && auto.pendingWrite=="FINISH" && !auto.recordBound)
-                        TextButton(onClick={confirmArchive=true},enabled=!state.busy) { Text("官方无记录，处理本地任务") }
                 }
                 val verifying=auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.STARTING,
                     io.github.ibudaoa.running.AutomaticRunPhase.FINISHING,io.github.ibudaoa.running.AutomaticRunPhase.AWAITING_VERDICT)
                 val finished=auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.VALID,io.github.ibudaoa.running.AutomaticRunPhase.INVALID)
-                if(auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.RUNNING,io.github.ibudaoa.running.AutomaticRunPhase.PAUSED)) {
+                val finishUnknown=active && !auto.recordBound && auto.pendingWrite=="FINISH"
+                if(finishUnknown) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Button(onClick = onDiscardAutomatic, modifier = Modifier.weight(1f).heightIn(min = 60.dp),
+                            shape = RoundedCornerShape(30.dp), enabled = !state.busy,
+                            colors = ButtonDefaults.buttonColors(containerColor=MaterialTheme.colorScheme.secondaryContainer,
+                                contentColor=MaterialTheme.colorScheme.onSecondaryContainer)) {
+                            Text("无效", style=MaterialTheme.typography.titleLarge)
+                        }
+                        Button(onClick = onArchiveAutomatic, modifier = Modifier.weight(1f).heightIn(min = 60.dp),
+                            shape = RoundedCornerShape(30.dp), enabled = !state.busy) {
+                            Text("有效", style=MaterialTheme.typography.titleLarge)
+                        }
+                    }
+                } else if(auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.RUNNING,io.github.ibudaoa.running.AutomaticRunPhase.PAUSED)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         Button(onClick = onAutomaticAction, modifier = Modifier.weight(1f).heightIn(min = 60.dp),
                             shape = RoundedCornerShape(30.dp), enabled = !state.busy) {
@@ -749,7 +760,7 @@ internal fun MapPage(
                     Text(when {
                         finished -> "完成"
                         verifying -> "核验中"
-                        active -> "核对本次记录"
+                        active -> if(auto.recordBound) "核对本次记录" else "结束本次任务"
                         planned -> "开始自动运行"
                         needsLogin -> "重新登录"
                         needsConfig -> "更新学校配置"

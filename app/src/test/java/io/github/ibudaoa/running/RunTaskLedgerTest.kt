@@ -150,6 +150,39 @@ class RunTaskLedgerTest {
         task.releaseResolved();assertNull(journal.bytes);assertNotNull(journal.archived);assertFalse(journal.archived!!.toString(Charsets.UTF_8).contains("proof"))
         assertEquals(RunTaskPhase.PREPARED,task(journal).summary.phase)
     }
+    @Test fun `interrupted run without a record is discarded instead of blocking every later run`() {
+        val journal=Journal();val task=running(journal);task.background()
+        val restored=RunTaskLedger.restore(journal,123)!!;restored.foreground()
+        assertEquals(RunTaskPhase.INTERRUPTED,restored.summary.phase)
+        assertTrue(restored.canDiscardUnverifiable());assertFalse(restored.canResolveFinishUnknown())
+        restored.discardUnverifiable();assertNull(journal.bytes)
+        assertEquals(RunTaskPhase.PREPARED,task(journal).summary.phase)
+    }
+    @Test fun `unknown finish keeps its evidence until the user decides`() {
+        val journal=Journal();val task=running(journal);task.uncertain(task.begin(RunWrite.FINISH))
+        assertFalse(task.canDiscardUnverifiable());assertTrue(task.canResolveFinishUnknown())
+        val restored=RunTaskLedger.restore(journal,123)!!;restored.foreground()
+        assertEquals(RunTaskPhase.WRITE_UNCERTAIN,restored.summary.phase)
+        assertTrue(restored.canResolveFinishUnknown())
+        restored.discardFinishUnknown();assertNull(journal.bytes)
+    }
+    @Test fun `user reported valid keeps a marker and never becomes a platform verdict`() {
+        val journal=Journal();val task=running(journal);task.uncertain(task.begin(RunWrite.FINISH))
+        task.archiveUserReportedValid()
+        assertNull(journal.bytes)
+        val archived=journal.archived!!.toString(Charsets.UTF_8)
+        assertTrue(archived.contains("USER_REPORTED"));assertTrue(archived.contains("\"phase\":\"VALID\""))
+        assertFalse(archived.contains("proof"));assertFalse(task.summary.toString().contains("USER_REPORTED"))
+    }
+    @Test fun `bound records and failed storage cannot be discarded or archived by hand`() {
+        val journal=Journal();val task=running(journal);task.accept(task.begin(RunWrite.FINISH),finish)
+        assertFalse(task.canDiscardUnverifiable());assertFalse(task.canResolveFinishUnknown())
+        assertTrue(runCatching { task.discardFinishUnknown() }.isFailure)
+        val broken=Journal();val uncertain=running(broken);broken.fail=true
+        assertTrue(runCatching { uncertain.pause() }.isFailure);broken.fail=false
+        assertFalse(uncertain.canDiscardUnverifiable())
+        assertTrue(runCatching { uncertain.discardUnverifiable() }.isFailure)
+    }
     @Test fun `restoration for a different account never rebinds or removes the pending task`() {
         val journal=Journal();running(journal);val saved=journal.bytes!!.clone()
         assertTrue(runCatching { RunTaskLedger.restore(journal,456) }.isFailure)
