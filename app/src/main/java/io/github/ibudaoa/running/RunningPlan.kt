@@ -26,7 +26,7 @@ enum class RunningPlanProblem(val label:String) {
 }
 data class RunningPlanSummary(val phase:RunningPlanPhase=RunningPlanPhase.IDLE,val problem:RunningPlanProblem?=null,
     val distanceMeters:Int?=null,val paceSecondsPerKm:Int?=null,val durationSeconds:Int?=null,val pointCount:Int?=null,
-    val accessDistanceMeters:Int?=null,val failureStage:String?=null)
+    val accessDistanceMeters:Int?=null,val failureStage:String?=null,val note:String?=null)
 internal class RunningPlan(val route:FixedPointRoute,val targetPaceSecondsPerKm:Int,val durationSeconds:Int,
     val rule:CampusTimeRule,val plannedDate:java.time.LocalDate)
 object RunningPlanRules {

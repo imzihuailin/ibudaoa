@@ -573,7 +573,7 @@ internal fun MapPage(
                         IconButton(onClick = { expanded = true }) { Icon(Icons.Default.MoreVert, "更多操作") }
                         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                             DropdownMenuItem(text = { Text("跑前热身") }, onClick = { expanded = false; onWarmup() })
-                            if (state.diagnosticMode) DropdownMenuItem(text={Text("导出诊断")},enabled=state.config!=null && !state.busy,
+                            if (state.diagnosticMode) DropdownMenuItem(text={Text("导出诊断")},enabled=state.config!=null && !state.busy && !state.automaticRun.blocksExternalUi,
                                 onClick={expanded=false;onExport()})
                             if (state.diagnosticMode) DropdownMenuItem(text={Text("确认往返道路")},enabled=state.baseRoadGraph?.edges?.isNotEmpty()==true && !state.busy && !state.capture.active,
                                 onClick={expanded=false;onReviewRoadDirections()})
@@ -583,7 +583,7 @@ internal fun MapPage(
                                 DropdownMenuItem(text={ Text("本地路线预览") },
                                     enabled=state.roadGraph?.edges?.isNotEmpty() == true && state.mapConsent && !state.busy && !state.capture.active,
                                     onClick={ expanded=false; onPrepareLocalPreview() })
-                                DropdownMenuItem(text = { Text("导出连接诊断") }, enabled = !state.busy,
+                                DropdownMenuItem(text = { Text("导出连接诊断") }, enabled = !state.busy && !state.automaticRun.blocksExternalUi,
                                     onClick = { expanded = false; onExportConnectionReport() })
                                 DropdownMenuItem(text = { Text("导入诊断配置") }, enabled = !state.busy && !state.capture.active,
                                     onClick = { expanded = false; onImport() })
@@ -625,7 +625,7 @@ internal fun MapPage(
                     Spacer(Modifier.height(14.dp))
                 }
                 if(runningPage && state.runningPlanSummary.phase!=io.github.ibudaoa.running.RunningPlanPhase.IDLE) {
-                    (state.runningPlanSummary.problem?.label ?: when(state.runningPlanSummary.phase) {
+                    (state.runningPlanSummary.problem?.label ?: state.runningPlanSummary.note ?: when(state.runningPlanSummary.phase) {
                         io.github.ibudaoa.running.RunningPlanPhase.CHECKING -> "正在读取跑前条件"
                         io.github.ibudaoa.running.RunningPlanPhase.SYNCING -> "正在同步规则"
                         io.github.ibudaoa.running.RunningPlanPhase.WAITING_LOCATION -> "等待定位"
@@ -789,15 +789,16 @@ internal fun SettingsPage(state: AppState, onExit: () -> Unit, onConnect: () -> 
         val uriHandler=LocalUriHandler.current
         val inspecting = LocalInspectionMode.current
         fun openPage(url:String) {
-            if (inspecting) return
-            if(state.automaticRun.blocksExternalUi)onMessage("请等待本次执行结束后再打开外部页面。")
-            else runCatching { uriHandler.openUri(url) }.onFailure { onMessage("无法打开页面，请检查浏览器。") }
+            if (inspecting || state.automaticRun.blocksExternalUi) return
+            runCatching { uriHandler.openUri(url) }.onFailure { onMessage("无法打开页面，请检查浏览器。") }
         }
-        ToolCard("GitHub 仓库", repository?.let { "${it.owner}/${it.name}" } ?: "仓库地址待配置", Icons.Default.Code, Icons.AutoMirrored.Filled.OpenInNew) {
+        ToolCard("GitHub 仓库", repository?.let { "${it.owner}/${it.name}" } ?: "仓库地址待配置", Icons.Default.Code, Icons.AutoMirrored.Filled.OpenInNew,
+            enabled = !state.automaticRun.blocksExternalUi) {
             if(repository!=null)openPage(repository.url) else onMessage("项目仓库尚未配置，当前没有可打开的仓库链接。")
         }
         val update=state.updateCheck
-        ToolCard("检查更新", "当前版本 ${BuildConfig.VERSION_NAME} · ${update.label}", Icons.Default.Refresh, Icons.AutoMirrored.Filled.OpenInNew) {
+        ToolCard("检查更新", "当前版本 ${BuildConfig.VERSION_NAME} · ${update.label}", Icons.Default.Refresh, Icons.AutoMirrored.Filled.OpenInNew,
+            enabled = !state.automaticRun.blocksExternalUi) {
             val page=update.releaseUrl
             if(page!=null && update.phase in setOf(io.github.ibudaoa.updates.UpdatePhase.AVAILABLE,io.github.ibudaoa.updates.UpdatePhase.UNSUPPORTED))openPage(page)
             else onCheckUpdates()
@@ -806,8 +807,8 @@ internal fun SettingsPage(state: AppState, onExit: () -> Unit, onConnect: () -> 
 }
 
 @Composable
-private fun ToolCard(title: String, subtitle: String, icon: ImageVector, trailing: ImageVector, onClick: () -> Unit) {
-    Card(onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp),
+private fun ToolCard(title: String, subtitle: String, icon: ImageVector, trailing: ImageVector, enabled: Boolean = true, onClick: () -> Unit) {
+    Card(onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), enabled = enabled,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
         Row(Modifier.fillMaxWidth().padding(20.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)) {

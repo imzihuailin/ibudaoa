@@ -288,12 +288,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun blockRunningPlan(problem:RunningPlanProblem) {
         preparingRun=false;runGrant=null;preparedRunningPlan=null
         mutableState.update { it.copy(localPreview=null,runningPlanSummary=RunningPlanSummary(RunningPlanPhase.BLOCKED,problem,failureStage=runPreparationStage)) }
-        showMessage(problem.label)
+    }
+    private fun blockRunningPlan(note:String) {
+        preparingRun=false;runGrant=null;preparedRunningPlan=null
+        mutableState.update { it.copy(localPreview=null,runningPlanSummary=RunningPlanSummary(RunningPlanPhase.BLOCKED,failureStage=runPreparationStage,note=note)) }
     }
     fun prepareRunningPlan(lifecycle:Lifecycle) {
         if (!hasPreciseLocation()) return showMessage("未获得定位权限")
         if(!automaticJournalChecked)return showMessage("正在恢复本地任务状态，请稍后继续。")
-        if(automaticTaskOpen())return showMessage("请先核对当前自动任务的结果。")
+        if(automaticTaskOpen())return blockRunningPlan(RunningPlanProblem.TASK_STATE)
         automaticController=null
         mutableState.update { it.copy(automaticRun=AutomaticRunSummary(),automaticRoute=null,automaticPosition=null) }
         val initial=state.value
@@ -462,14 +465,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if(automaticJournalPending)return restoreAutomaticResult()
         val snapshot=state.value
         if(snapshot.busy || snapshot.capture.active || automaticJob?.isActive==true || !lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))return
-        val plan=preparedRunningPlan ?: return showMessage("请先生成本次运行计划。")
-        val grant=runGrant ?: return showMessage("请重新核对运行计划。")
+        val plan=preparedRunningPlan ?: return blockRunningPlan(RunningPlanProblem.PLAN_FAILED)
+        val grant=runGrant ?: return blockRunningPlan(RunningPlanProblem.ONLINE_EXPIRED)
         val config=snapshot.config ?: return
         if(!AccountSessionRuntime.session.isCurrent(grant,Instant.now().epochSecond))return blockRunningPlan(RunningPlanProblem.ONLINE_EXPIRED)
-        grant.executionRequirements.blockingProblem?.let { return showMessage(it.label) }
+        grant.executionRequirements.blockingProblem?.let { return blockRunningPlan(it.label) }
         val selected=snapshot.previewPoints ?: return
-        if(selected.selectedIds.any { it.toLongOrNull()?.let { value -> value>0 }!=true })return showMessage("当前点位编号格式尚未适配，尚未启动任务。")
-        if(selected.selectedIds!=plan.route.selectedIds || selected.locked)return showMessage("本次固定点位状态已变化，请重新核对。")
+        if(selected.selectedIds.any { it.toLongOrNull()?.let { value -> value>0 }!=true })return blockRunningPlan(RunningPlanProblem.PLAN_FAILED)
+        if(selected.selectedIds!=plan.route.selectedIds || selected.locked)return blockRunningPlan(RunningPlanProblem.PLAN_FAILED)
         val reviewed=snapshot.localPreview ?: return blockRunningPlan(RunningPlanProblem.PLAN_FAILED)
         val graph=snapshot.roadGraph ?: return blockRunningPlan(RunningPlanProblem.PLAN_FAILED)
         fun startProblem():RunningPlanProblem? {
@@ -649,7 +652,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val snapshot = state.value
         if (snapshot.busy || snapshot.capture.active || !snapshot.mapConsent || roadJob != null) return
         val config = snapshot.config ?: return
-        val graph = snapshot.roadGraph ?: return showMessage("道路资料尚未就绪。")
+        val graph = snapshot.roadGraph ?: return
         preparingRun=false;runGrant=null;preparedRunningPlan=null
         mutableState.update { it.copy(runningPlanSummary=RunningPlanSummary()) }
         mutableState.update { it.copy(busy = true, localPreview = null) }
@@ -668,13 +671,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     is PreviewPreparation.Blocked -> {
                         mutableState.update { it.copy(previewSummary=LocalPreviewSummary(graph.scope,PreviewPhase.BLOCKED,
                             problem=result.problem,pointProblem=result.pointProblem)) }
-                        showMessage(if (result.problem == PreviewProblem.LOCATION_REQUIRED)
-                            state.value.locationDiagnostics?.label ?: result.problem.label
-                            else result.pointProblem?.label ?: result.problem.label)
+                        blockRunningPlan(when (result.problem) {
+                            PreviewProblem.LOCATION_REQUIRED, PreviewProblem.POSITION_CHANGED -> RunningPlanProblem.LOCATION
+                            PreviewProblem.POINT_SELECTION -> RunningPlanProblem.POINT_SELECTION
+                            else -> RunningPlanProblem.PLAN_FAILED
+                        })
                     }
                 }
             } catch (e: CancellationException) { throw e }
-            catch (_: Exception) { showMessage("本地路线预览未完成，请检查定位和道路资料。") }
+            catch (_: Exception) { }
             finally { mutableState.update { it.copy(busy=false) }; previewJob=null }
         }
     }
@@ -697,7 +702,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     RunningPlanProblem.LOCATION else RunningPlanProblem.PLAN_FAILED)
                 mutableState.update { it.copy(localPreview=null,previewSummary=LocalPreviewSummary(graph.scope,PreviewPhase.BLOCKED,
                     preview.points.selectedIds.size,problem=after)) }
-                showMessage(after.label)
                 return
             }
             if(preparingRun) {
@@ -711,16 +715,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val (plan,planSummary)=RunningPlanRules.create(config,route,Instant.now(),ZoneId.of("Asia/Shanghai"))
                 preparedRunningPlan=plan;preparingRun=false
                 mutableState.update { it.copy(localPreview=updated,previewSummary=summary,runningPlanSummary=planSummary) }
-                showMessage(planSummary.problem?.label ?: "本次距离、配速和路线计划已生成，尚未创建运动。")
                 return
             }
             mutableState.update { it.copy(localPreview=updated,previewSummary=summary) }
-            showMessage(if (updated?.route != null) "本地路线草稿已生成，尚未开始运动。"
-                else summary.problem?.label ?: "当前道路尚不能生成完整草稿。")
         } catch (e: CancellationException) { throw e }
         catch (_: Exception) {
             if(preparingRun) blockRunningPlan(RunningPlanProblem.PLAN_FAILED)
-            else { mutableState.update { it.copy(localPreview=null) };showMessage("本地路线计算未完成，请重试。") }
+            else mutableState.update { it.copy(localPreview=null) }
         }
         finally { mutableState.update { it.copy(busy=false) }; previewJob=null }
     }
@@ -753,7 +754,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun continueAccountReadCheck() = requestCapture(CapturePurpose.ACCOUNT_READ_CHECK)
     fun continueAccountSession() {
         if(automaticController?.summary?.phase in setOf(AutomaticRunPhase.STARTING,AutomaticRunPhase.RUNNING,AutomaticRunPhase.PAUSED,AutomaticRunPhase.FINISHING))
-            return showMessage("自动任务进行中，请先结束并核对记录。")
+            return
         requestCapture(CapturePurpose.ACCOUNT_SESSION)
     }
     fun disconnectAccountSession() = operation("当前自动任务尚未核对，不能退出账号。") {
@@ -767,7 +768,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         var remaining=60
         while(CaptureVpnService.running && remaining-->0) delay(50)
         if(CaptureVpnService.running) {
-            messages.send("临时连接尚未关闭，本次没有发出会话请求。")
             return@operation
         }
         withContext(Dispatchers.IO) {
@@ -1287,7 +1287,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var updateJob:Job?=null
     private var updateClient:io.github.ibudaoa.updates.ReleaseUpdateClient?=null
     fun checkUpdates() {
-        if(state.value.automaticRun.blocksExternalUi)return showMessage("请等待本次执行结束后再检查更新。")
+        if(state.value.automaticRun.blocksExternalUi)return
         if(updateJob?.isActive==true)return
         val repository=io.github.ibudaoa.updates.ReleaseRepository.parse(io.github.ibudaoa.BuildConfig.REPOSITORY_URL)
         if(repository==null) {
