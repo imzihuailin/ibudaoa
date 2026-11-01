@@ -281,7 +281,7 @@ fun IbudaoaApp(
         Dialog(onDismissRequest = { showRoadDirections = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
                 CampusMap(state.config, state.mapConsent, false, state.roadEvidence, null,
-                    modifier = Modifier.fillMaxSize(), reviewRoad = road)
+                    modifier = Modifier.fillMaxSize(), reviewRoad = road, showDiagnostics = state.diagnosticMode)
                 Surface(Modifier.align(Alignment.TopCenter).fillMaxWidth(), color = MaterialTheme.colorScheme.surfaceContainer) {
                     Row(Modifier.statusBarsPadding().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("确认往返道路  ${index + 1}/${reviewedRoads.size}", Modifier.weight(1f),
@@ -323,7 +323,7 @@ fun IbudaoaApp(
             properties = DialogProperties(usePlatformDefaultWidth = false)) {
             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
                 CampusMap(state.config, state.mapConsent, false, state.roadEvidence, null,
-                    modifier = Modifier.fillMaxSize(), reviewGap = gap)
+                    modifier = Modifier.fillMaxSize(), reviewGap = gap, showDiagnostics = state.diagnosticMode)
                 Surface(Modifier.align(Alignment.TopCenter).fillMaxWidth(), color = MaterialTheme.colorScheme.surfaceContainer) {
                     Row(Modifier.statusBarsPadding().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("确认道路连接  ${index + 1}/${reviewPlan.gaps.size}", Modifier.weight(1f),
@@ -549,7 +549,7 @@ internal fun MapPage(
             selectedIds=state.automaticRoute?.selectedIds ?: state.localPreview?.points?.selectedIds.orEmpty(),
             automaticDisplay=runningPage && state.automaticRun.phase!=io.github.ibudaoa.running.AutomaticRunPhase.IDLE,
             automaticPosition=state.automaticPosition.takeIf { runningPage },
-            showMapInfo = !runningPage)
+            showMapInfo = !runningPage, showDiagnostics = state.diagnosticMode)
         if (BuildConfig.MAP_KEY_CONFIGURED && state.mapConsent && state.config != null) {
             Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(
                 colors.background.copy(alpha = 0.80f), colors.background.copy(alpha = 0.15f),

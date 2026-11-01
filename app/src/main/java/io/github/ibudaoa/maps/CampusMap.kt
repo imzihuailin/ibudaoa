@@ -56,7 +56,7 @@ import kotlinx.coroutines.delay
 fun CampusMap(config: DiagnosticConfig?, consent: Boolean, active: Boolean, roadEvidence: RoadEvidenceSnapshot?, routeDraft: FixedPointRoute?, modifier: Modifier = Modifier, reviewGap: RoadGap? = null, reviewRoad: ObservedRoadEdge? = null, originProposal: OriginRoadProposal? = null,
     selectedIds: List<String> = emptyList(), automaticDisplay:Boolean=false,
     automaticPosition:io.github.ibudaoa.domain.CampusCoordinate?=null,
-    showMapInfo: Boolean = true) {
+    showMapInfo: Boolean = true, showDiagnostics: Boolean = false) {
     if (!BuildConfig.MAP_KEY_CONFIGURED || !consent || config == null) return
     val location=LocalForegroundLocation.current
     val context = LocalContext.current
@@ -101,33 +101,36 @@ fun CampusMap(config: DiagnosticConfig?, consent: Boolean, active: Boolean, road
     }
     Box(modifier.fillMaxSize()) {
         if (host != null) AndroidView(factory = { host.view }, update = { host.showRoadEvidence(roadEvidence); host.showRouteDraft(routeDraft); host.showReviewGap(reviewGap); host.showReviewRoad(reviewRoad); host.showOriginProposal(originProposal); host.showSelected(selectedIds); host.showAutomatic(automaticPosition) }, modifier = Modifier.fillMaxSize())
-        Column(Modifier.align(Alignment.BottomStart).padding(start = 16.dp, bottom = 175.dp)) {
-            val mapStatus = when {
-                host == null -> "地图初始化失败或设备架构不支持"
-                loadSlow && !loaded -> "地图尚未加载，请检查网络和地图授权"
-                !loaded -> "正在加载学校地图…"
-                !showMapInfo -> null
-                else -> when {
-                    automaticDisplay -> "自动执行位置 · 沿本次固定路线推进"
-                    routeDraft != null -> "本次计划路线"
-                    roadEvidence != null -> "道路资料预览 · 本次路线尚未确定"
-                    else -> "官方候选点 · 道路待核对"
+        // Normal mode keeps the map free of left-bottom hints; debug mode restores the full panel for diagnosis.
+        if (showDiagnostics) {
+            Column(Modifier.align(Alignment.BottomStart).padding(start = 16.dp, bottom = 175.dp)) {
+                val mapStatus = when {
+                    host == null -> "地图初始化失败或设备架构不支持"
+                    loadSlow && !loaded -> "地图尚未加载，请检查网络和地图授权"
+                    !loaded -> "正在加载学校地图…"
+                    !showMapInfo -> null
+                    else -> when {
+                        automaticDisplay -> "自动执行位置 · 沿本次固定路线推进"
+                        routeDraft != null -> "本次计划路线"
+                        roadEvidence != null -> "道路资料预览 · 本次路线尚未确定"
+                        else -> "官方候选点 · 道路待核对"
+                    }
                 }
+                mapStatus?.let { Text(it, color = MaterialTheme.colorScheme.onBackground, style = MaterialTheme.typography.labelSmall) }
+                if (active && host != null && !automaticDisplay) {
+                    if (showMapInfo || locationCheck?.status != LocationCheckStatus.ACCEPTED) {
+                        Text(locationStatus, style = MaterialTheme.typography.labelSmall)
+                    }
+                    if (context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                        TextButton(onClick = {
+                            permission.request()
+                        }) { Text("允许前台定位") }
+                    } else if (locationCheck?.status != LocationCheckStatus.ACCEPTED) {
+                        TextButton(onClick=location.retry) { Text("立即重试定位") }
+                    }
+                }
+                if (host == null || loadSlow && !loaded) TextButton(onClick = { attempt++ }) { Text("重试地图") }
             }
-            mapStatus?.let { Text(it, color = MaterialTheme.colorScheme.onBackground, style = MaterialTheme.typography.labelSmall) }
-            if (active && host != null && !automaticDisplay) {
-                if (showMapInfo || locationCheck?.status != LocationCheckStatus.ACCEPTED) {
-                    Text(locationStatus, style = MaterialTheme.typography.labelSmall)
-                }
-                if (context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-                    TextButton(onClick = {
-                        permission.request()
-                    }) { Text("允许前台定位") }
-                } else if (locationCheck?.status != LocationCheckStatus.ACCEPTED) {
-                    TextButton(onClick=location.retry) { Text("立即重试定位") }
-                }
-            }
-            if (host == null || loadSlow && !loaded) TextButton(onClick = { attempt++ }) { Text("重试地图") }
         }
     }
 }
