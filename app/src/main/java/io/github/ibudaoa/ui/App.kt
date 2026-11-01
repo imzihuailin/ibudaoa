@@ -538,7 +538,8 @@ internal fun MapPage(
             state.automaticRoute ?: state.localPreview?.route ?: (state.routeResult as? io.github.ibudaoa.roads.RoutePlanResult.Draft)?.route,
             selectedIds=state.automaticRoute?.selectedIds ?: state.localPreview?.points?.selectedIds.orEmpty(),
             automaticDisplay=runningPage && state.automaticRun.phase!=io.github.ibudaoa.running.AutomaticRunPhase.IDLE,
-            automaticPosition=state.automaticPosition.takeIf { runningPage })
+            automaticPosition=state.automaticPosition.takeIf { runningPage },
+            showMapInfo = !runningPage)
         if (BuildConfig.MAP_KEY_CONFIGURED && state.mapConsent && state.config != null) {
             Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(
                 colors.background.copy(alpha = 0.80f), colors.background.copy(alpha = 0.15f),
@@ -590,7 +591,7 @@ internal fun MapPage(
                 if (state.gapChecking) Text("正在检查道路间隔 ${state.gapReport?.outcomes?.size ?: 0}/${state.gapReport?.planned ?: 0}，请保持应用前台。")
                 else state.gapReport?.let { Text("道路间隔检查：${it.outcomes.size}/${it.planned}，结果可导出。") }
                     ?: state.gapEvidence?.let { Text("已保存 ${it.records.size} 处道路间隔结果，可继续检查或导出。") }
-                state.previewSummary?.let { preview ->
+                state.previewSummary?.takeIf { !runningPage || it.phase != PreviewPhase.DRAFT }?.let { preview ->
                     Text(if (preview.phase == PreviewPhase.DRAFT) "${if (state.localPreview?.route != null) "本地草稿" else "上次本地预览"}约 ${String.format(Locale.ROOT,"%.2f",(preview.routeMeters ?: 0.0)/1000)} km · 拟定 ${preview.selectedCount} 个点"
                         else preview.pointProblem?.label ?: preview.problem?.label ?: "等待核对预览起点")
                 }
@@ -617,9 +618,8 @@ internal fun MapPage(
                     })
                     if (BuildConfig.DEBUG && state.runningPlanSummary.problem == io.github.ibudaoa.running.RunningPlanProblem.ROAD_REVIEW)
                         TextButton(onClick = onReviewRoadGaps, enabled = !state.busy) { Text("核对已有道路连接") }
-                    state.runningPlanSummary.accessDistanceMeters?.let { Text("自动路径包含约${it}米当前位置接入路段。") }
                 }
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (!runningPage) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Box(Modifier.size(9.dp).background(colors.onSurfaceVariant, CircleShape))
                     Text(if (state.capturedConfig) "官方配置已采集 · 待核对" else if (state.config == null) "尚未连接官方账号" else "诊断配置 · 未经平台验证",
                         style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
@@ -641,8 +641,6 @@ internal fun MapPage(
                 CircularProgressIndicator(Modifier.align(Alignment.CenterHorizontally).padding(12.dp).size(24.dp))
             }
             if (runningPage) {
-                Text("自动执行时请保持应用前台，屏幕将保持常亮。", Modifier.fillMaxWidth().padding(bottom = 12.dp),
-                    textAlign = TextAlign.Center, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                 val ready=state.capturedConfig && state.mapConsent && state.roadGraph!=null && !state.capture.active
                 val planned=state.runningPlanSummary.phase==io.github.ibudaoa.running.RunningPlanPhase.PLANNED
                 val auto=state.automaticRun
@@ -697,7 +695,7 @@ internal fun MapPage(
                     },style=MaterialTheme.typography.titleLarge)
                 }
             }
-            if(runningPage)Text("自动执行时保持应用前台亮屏，无需本人走跑。", Modifier.fillMaxWidth().padding(vertical = 14.dp),
+            if(runningPage)Text("运行时请保持屏幕常亮", Modifier.fillMaxWidth().padding(vertical = 14.dp),
                 style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center, color = colors.onSurfaceVariant)
         }
     }
