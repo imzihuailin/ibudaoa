@@ -28,8 +28,8 @@ android {
         applicationId = "io.github.ibudaoa"
         minSdk = 29
         targetSdk = 36
-        versionCode = 77
-        versionName = "0.21.2-plan-session"
+        versionCode = 78
+        versionName = "0.21.3-release-only"
         manifestPlaceholders["amapAndroidKey"] = localMapKey
         buildConfigField("boolean", "MAP_KEY_CONFIGURED", localMapKey.isNotEmpty().toString())
         buildConfigField("String", "REPOSITORY_URL", "\"$localRepositoryUrl\"")
@@ -48,9 +48,10 @@ android {
 
     kotlinOptions { jvmTarget = "17" }
 
-    // Optional local debug identity survives cleanup of the temporary SDK/toolchain.
-    val localDebugKey = rootProject.file(".local/signing/debug.keystore")
-    if (localDebugKey.isFile) signingConfigs.getByName("debug").storeFile = localDebugKey
+    // Optional local signing identity survives cleanup of the temporary SDK/toolchain.
+    // The file name is historical: this is the project-owned key for the only shipped build.
+    val localSigningKey = rootProject.file(".local/signing/debug.keystore")
+    if (localSigningKey.isFile) signingConfigs.getByName("debug").storeFile = localSigningKey
 
     packaging.resources {
         excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
@@ -60,13 +61,20 @@ android {
 
     buildTypes {
         release {
-            // First self-use release preserves the existing project-owned private signing identity.
+            // Single maintained build. First self-use release preserves the existing project-owned private signing identity.
             signingConfig = signingConfigs.getByName("debug")
             isDebuggable = false
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
+    }
+}
+
+// Only one product variant: the self-use release. Developer tools live behind the in-app diagnostic switch.
+androidComponents {
+    beforeVariants { variantBuilder ->
+        if (variantBuilder.buildType == "debug") variantBuilder.enable = false
     }
 }
 
@@ -80,13 +88,11 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.compose.material3)
     implementation(libs.compose.icons)
-    implementation(libs.compose.ui.tooling.preview)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.netty.http)
     implementation(libs.netty.handler)
     implementation(libs.bouncycastle.provider)
-    debugImplementation(libs.compose.ui.tooling)
     testImplementation(libs.junit)
 }
 

@@ -575,11 +575,11 @@ internal fun MapPage(
                             DropdownMenuItem(text = { Text("跑前热身") }, onClick = { expanded = false; onWarmup() })
                             if (state.diagnosticMode) DropdownMenuItem(text={Text("导出诊断")},enabled=state.config!=null && !state.busy,
                                 onClick={expanded=false;onExport()})
-                            if (BuildConfig.DEBUG) DropdownMenuItem(text={Text("确认往返道路")},enabled=state.baseRoadGraph?.edges?.isNotEmpty()==true && !state.busy && !state.capture.active,
+                            if (state.diagnosticMode) DropdownMenuItem(text={Text("确认往返道路")},enabled=state.baseRoadGraph?.edges?.isNotEmpty()==true && !state.busy && !state.capture.active,
                                 onClick={expanded=false;onReviewRoadDirections()})
-                            if (BuildConfig.DEBUG) DropdownMenuItem(text={Text("手动确认道路连接")},enabled=state.gapPlan?.gaps?.isNotEmpty()==true && !state.busy && !state.capture.active,
+                            if (state.diagnosticMode) DropdownMenuItem(text={Text("手动确认道路连接")},enabled=state.gapPlan?.gaps?.isNotEmpty()==true && !state.busy && !state.capture.active,
                                 onClick={expanded=false;onReviewRoadGaps()})
-                            if (BuildConfig.DEBUG) {
+                            if (state.diagnosticMode) {
                                 DropdownMenuItem(text={ Text("本地路线预览") },
                                     enabled=state.roadGraph?.edges?.isNotEmpty() == true && state.mapConsent && !state.busy && !state.capture.active,
                                     onClick={ expanded=false; onPrepareLocalPreview() })
@@ -633,7 +633,7 @@ internal fun MapPage(
                         io.github.ibudaoa.running.RunningPlanPhase.PLANNED -> "本次计划 · 预计${((state.runningPlanSummary.durationSeconds ?: 0)+59)/60}分钟"
                         else -> "计划尚未就绪"
                     })
-                    if (BuildConfig.DEBUG && state.runningPlanSummary.problem == io.github.ibudaoa.running.RunningPlanProblem.ROAD_REVIEW)
+                    if (state.diagnosticMode && state.runningPlanSummary.problem == io.github.ibudaoa.running.RunningPlanProblem.ROAD_REVIEW)
                         TextButton(onClick = onReviewRoadGaps, enabled = !state.busy) { Text("核对已有道路连接") }
                 }
                 if (!runningPage) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
