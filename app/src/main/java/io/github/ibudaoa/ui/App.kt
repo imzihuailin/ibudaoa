@@ -398,7 +398,10 @@ fun IbudaoaApp(
             batterySkipped = skippedBattery,
             onSkipBattery = { skippedBattery = true },
             onContinue = {
-                if (roads == null) return@WarmupDialog
+                if (WarmupPolicy.needsLogin(state)) {
+                    onReconnect()
+                    return@WarmupDialog
+                }
                 if (!WarmupPolicy.needsLogin(state) && state.locationGranted && state.mapConsent && roads?.ready == true && !state.busy && !state.capture.active && state.capture.phase != CapturePhase.ERROR &&
                     state.capturedConfig && state.captureRevision == DiagnosticStore.CURRENT_CAPTURE_REVISION) {
                     showWarmup = false
@@ -688,9 +691,6 @@ internal fun MapPage(
                     val remaining=auto.remainingSeconds
                     if(remaining!=null && auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.RUNNING,io.github.ibudaoa.running.AutomaticRunPhase.PAUSED))
                         Text((if(auto.phase==io.github.ibudaoa.running.AutomaticRunPhase.PAUSED) "继续后预计还需 " else "预计剩余 ")+"%d分%02d秒".format(Locale.ROOT,remaining/60,remaining%60),style=MaterialTheme.typography.bodyMedium)
-                    if(auto.phase==io.github.ibudaoa.running.AutomaticRunPhase.INVALID)
-                        Text(state.automaticFailureReason?.takeIf { it.isNotBlank() }?.let { "本次记录未被判定有效：$it" } ?: "本次记录未被判定有效",
-                            style=MaterialTheme.typography.bodyMedium,color=colors.error)
                     if(state.diagnosticMode) {
                         Text(when(auto.phase) {
                             io.github.ibudaoa.running.AutomaticRunPhase.STARTING -> "正在登记本次自动任务"
