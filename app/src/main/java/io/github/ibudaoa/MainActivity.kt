@@ -27,7 +27,7 @@ import io.github.ibudaoa.ui.IbudaoaApp
 import io.github.ibudaoa.ui.IbudaoaTheme
 
 class MainActivity : ComponentActivity() {
-    private val model: AppViewModel by viewModels()
+    private val model: AppViewModel by lazy { io.github.ibudaoa.running.RunRuntime.model(application) }
     private val importConfig = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(model::importConfig)
     }
@@ -127,8 +127,8 @@ class MainActivity : ComponentActivity() {
         }
         setContent {
             val state by model.state.collectAsStateWithLifecycle()
-            DisposableEffect(state.session.keepScreenOn) {
-                if (state.session.keepScreenOn) {
+            DisposableEffect(state.session.keepScreenOn, state.batteryUnrestricted) {
+                if (state.session.keepScreenOn && !state.batteryUnrestricted) {
                     window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 } else {
                     window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -190,6 +190,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if(intent.getBooleanExtra("run_notification",false))model.openRunningNotification()
     }
 
     override fun onStart() {
@@ -204,6 +205,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshLocationPermission()
+        if(intent.getBooleanExtra("run_notification",false)) { model.openRunningNotification();intent.removeExtra("run_notification") }
+        model.refreshBackgroundPolicy()
         model.onAutomaticForegroundReturned()
         val returnedGeneration=intent.getLongExtra("capture_return_generation",-1L)
         if (returnedGeneration == io.github.ibudaoa.capture.CaptureRuntime.state.value.generation &&
@@ -264,7 +267,6 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onPause() {
-        model.interruptAutomatic()
         model.cancelRoadCheck()
         super.onPause()
     }

@@ -3,6 +3,7 @@ package io.github.ibudaoa
 import android.app.Application
 import android.net.Uri
 import android.os.SystemClock
+import kotlinx.serialization.json.*
 import io.github.ibudaoa.preview.*
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.AndroidViewModel
@@ -59,6 +60,9 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 data class AppState(
+    val automaticRestoring: Boolean = false,
+    val runNotificationEntry: Int = 0,
+    val batteryUnrestricted: Boolean = false,
     val diagnosticMode: Boolean = false,
     val loaded: Boolean = false,
     val config: DiagnosticConfig? = null,
@@ -143,6 +147,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var completedCaptureReturnGeneration = 0L
     private var captureFlowActive = CaptureRuntime.state.value.active
     private var accountForeground=false
+    private var executionRequirements:RunRuntimeRequirements?=null
+    private var executionConfig:JsonObject?=null
+    private var backgroundExecution=false
+    private fun executionAllowed() = accountForeground || backgroundExecution
+    fun pauseFromOutside() {
+        if(state.value.automaticRun.phase==AutomaticRunPhase.FINISHING) {
+            backgroundExecution=false;interruptAutomatic();return
+        }
+        automaticController?.pause()
+        runCatching { saveAutomaticProgress() }.onFailure { interruptAutomatic();showMessage("进度保存失败，任务已停止推进") }
+        publishAutomatic()
+        backgroundExecution=false
+    }
     private var accountResumeJob:Job?=null
     private var runPreparationJob:Job?=null
     private var automaticJob:Job?=null
@@ -154,6 +171,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var verificationWindow:RunVerificationWindow?=null
     private var restoredAutomaticLedger:RunTaskLedger?=null
     private var finishUnknownNotified=false
+    private val recoveryGate=RunRecoveryGate<Triple<Long,DiagnosticConfig?,Long>>()
     private var restoreNoticeShown=false
     private var preparingRun=false
     private var runGrant:VerifiedSchoolConfig?=null
@@ -190,12 +208,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             automaticJournalPending=withContext(Dispatchers.IO) { runCatching { automaticJournal.load()?.let { bytes -> bytes.fill(0);true } ?: false }.getOrDefault(true) }
             automaticJournalChecked=true
             if(automaticJournalPending) {
-                mutableState.update { it.copy(session=SessionState(io.github.ibudaoa.domain.SessionPhase.INTERRUPTED,needsReconciliation=true),
+                mutableState.update { it.copy(automaticRestoring=true,session=SessionState(io.github.ibudaoa.domain.SessionPhase.INTERRUPTED,needsReconciliation=true),
                     automaticRun=AutomaticRunSummary(AutomaticRunPhase.INTERRUPTED,problem="SAVED_TASK_REQUIRES_RECONCILIATION")) }
                 reconcilePendingAutomatic()
             }
         }
 
+        viewModelScope.launch {
+            state.collect { reconcilePendingAutomatic() }
+        }
         viewModelScope.launch {
             while(true) {
                 delay(1000);AccountSessionRuntime.session.expire()
@@ -437,6 +458,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun automaticTaskOpen():Boolean = automaticJournalPending || automaticController?.summary?.let {
         it.phase !in setOf(AutomaticRunPhase.VALID,AutomaticRunPhase.INVALID,AutomaticRunPhase.IDLE)
     }==true
+    private suspend fun advanceAutomatic(controller:AutomaticRunController) {
+        if(backgroundExecution && (!BackgroundPolicy.unrestricted(getApplication()) || !RunService.available(getApplication(),false)))pauseFromOutside()
+        if(executionAllowed()) {
+            controller.tick();saveAutomaticProgress();publishAutomatic()
+        }
+    }
+    private fun saveAutomaticProgress() {
+        val controller=automaticController ?: return
+        val config=executionConfig ?: return
+        val requirements=executionRequirements ?: return
+        controller.saveExecution(config,requirements)
+    }
     private fun publishAutomatic() {
         val summary=automaticController?.summary ?: return
         val phase=when(summary.phase) {
@@ -456,6 +489,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             current.copy(automaticRun=summary.copy(verification=current.automaticRun.verification),automaticPosition=automaticController?.timeline?.current()?.coordinate,
                 automaticFailureReason=failureReason,
                 automaticNotice=notice,
+                runningPlanSummary=RunningPlanSummary(distanceMeters=kotlin.math.ceil(summary.targetMeters).toInt(),
+                    paceSecondsPerKm=automaticController?.timeline?.paceSecondsPerKm),
                 session=SessionState(phase,needsReconciliation=summary.phase==AutomaticRunPhase.INTERRUPTED))
         }
     }
@@ -464,8 +499,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val existing=automaticController
         if(existing!=null) {
             when(existing.summary.phase) {
-                AutomaticRunPhase.RUNNING -> { existing.pause();publishAutomatic();return }
-                AutomaticRunPhase.PAUSED -> { existing.resume();publishAutomatic();return }
+                AutomaticRunPhase.RUNNING -> { pauseFromOutside();return }
+                AutomaticRunPhase.PAUSED -> {
+                    if(!RunService.available(getApplication())) { showMessage("请开启通知后继续");return }
+                    if(existing.ledger.summary.needsReconciliation || state.value.config?.config!=executionConfig) {
+                        showMessage("任务状态或学校配置已变化，原任务已保留");return
+                    }
+                    backgroundExecution=BackgroundPolicy.unrestricted(getApplication())
+                    runCatching { RunService.start(getApplication()) }.onFailure { backgroundExecution=false;showMessage("无法启动运动服务");return }
+                    existing.resume();saveAutomaticProgress();publishAutomatic();return
+                }
                 AutomaticRunPhase.AWAITING_VERDICT -> { queryAutomatic();return }
                 AutomaticRunPhase.INTERRUPTED -> { resolveInterruptedAutomatic(existing);return }
                 AutomaticRunPhase.VALID,AutomaticRunPhase.INVALID -> {
@@ -514,7 +557,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         startProblem()?.let { return blockRunningPlan(it) }
+        if(!RunService.available(getApplication()))return showMessage("请开启通知后开始")
+        backgroundExecution=BackgroundPolicy.unrestricted(getApplication())
         mutableState.update { it.copy(busy=true,automaticRun=AutomaticRunSummary(AutomaticRunPhase.STARTING)) }
+        try { RunService.start(getApplication()) } catch(_:Exception) {
+            backgroundExecution=false
+            mutableState.update { it.copy(busy=false,automaticRun=AutomaticRunSummary()) }
+            return showMessage("无法启动运动服务")
+        }
         automaticJob=viewModelScope.launch {
             var created:RunTaskLedger?=null
             try {
@@ -531,14 +581,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 store.savePointCache(selected.lockForExecution())
                 val gateway=io.github.ibudaoa.capture.AutomaticRunGateway(AccountSessionRuntime.session,config,grant.executionRequirements)
                 val controller=AutomaticRunController(ledger,timeline,gateway,grant.executionRequirements.gyroscopeRequired==true,
-                    { accountForeground && AccountSessionRuntime.session.runAccountId()==account },
+                    { executionAllowed() && AccountSessionRuntime.session.runAccountId()==account },
                     { startProblem()==null },{ SystemClock.elapsedRealtime() })
                 automaticController=controller
+                executionConfig=config.config;executionRequirements=grant.executionRequirements
+                controller.persist={ saveAutomaticProgress() }
                 mutableState.update { it.copy(automaticRoute=plan.route) };publishAutomatic()
                 if(!controller.start()) { publishAutomatic();return@launch }
+                saveAutomaticProgress()
                 mutableState.update { it.copy(busy=false) };publishAutomatic()
                 while(controller.summary.phase in setOf(AutomaticRunPhase.RUNNING,AutomaticRunPhase.PAUSED,AutomaticRunPhase.FINISHING)) {
-                    controller.tick();publishAutomatic();delay(500)
+                    advanceAutomatic(controller);delay(500)
                 }
                 releaseAutomaticIfResolved();ensureAutomaticVerification()
             } catch(e:CancellationException) { throw e }
@@ -586,7 +639,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 when(controller.reviewFinish()) {
                     is AutomaticFinishReview.Incomplete -> discardIncompleteAutomatic(controller)
-                    else -> { controller.finish();publishAutomatic();releaseAutomaticIfResolved() }
+                    else -> {
+                        backgroundExecution=BackgroundPolicy.unrestricted(getApplication())
+                        mutableState.update { it.copy(automaticRun=it.automaticRun.copy(phase=AutomaticRunPhase.FINISHING)) }
+                        RunService.start(getApplication())
+                        controller.finish();publishAutomatic();releaseAutomaticIfResolved()
+                    }
                 }
             }
             catch(e:CancellationException) { throw e }
@@ -624,7 +682,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val ledger=automaticController?.ledger ?: restoredAutomaticLedger ?: return
         if(!automaticJournalPending)return
         if(!ledger.summary.recordBound && !ledger.canResolveFinishUnknown())return
-        if(automaticJob?.isActive==true || !accountForeground)return
+        if(automaticJob?.isActive==true || !executionAllowed())return
         if(automaticVerificationJob?.isActive==true)return
         val window=verificationWindow ?: RunVerificationWindow().also { verificationWindow=it }
         window.resume(SystemClock.elapsedRealtime())
@@ -634,7 +692,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 if(ledger.summary.recordVerified) { settleVerifiedRecord(ledger);return@launch }
                 var nextQuery=0L
-                while(accountForeground && automaticJournalPending && !ledger.summary.recordVerified) {
+                while(executionAllowed() && automaticJournalPending && !ledger.summary.recordVerified) {
                     val now=SystemClock.elapsedRealtime()
                     if(window.remaining(now)==0L)break
                     if(ledger.summary.recordBound && now>=nextQuery) {
@@ -649,7 +707,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     publishVerificationState(window)
                     delay(minOf(1_000L,window.remaining(SystemClock.elapsedRealtime()).coerceAtLeast(1)))
                 }
-                if(accountForeground && automaticJournalPending && !ledger.summary.recordVerified)
+                if(executionAllowed() && automaticJournalPending && !ledger.summary.recordVerified)
                     publishVerificationState(window)
             } catch(e:CancellationException) { throw e }
             catch(_:Exception) { showMessage("本次记录尚未完成本地整理，请稍后重试。") }
@@ -675,7 +733,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         automaticVerificationJob?.cancel();automaticVerificationJob=null
         automaticController=null;restoredAutomaticLedger=null;verificationWindow=null;finishUnknownNotified=false
         preparedRunningPlan=null;runGrant=null
-        mutableState.update { it.copy(automaticRun=AutomaticRunSummary(),automaticFailureReason=null,automaticNotice=null,
+        mutableState.update { it.copy(automaticRestoring=false,automaticRun=AutomaticRunSummary(),automaticFailureReason=null,automaticNotice=null,
             automaticRoute=null,automaticPosition=null,session=SessionState(),
             runningPlanSummary=RunningPlanSummary(),localPreview=null,previewPoints=null,previewSummary=null,
             routeResult=null) }
@@ -688,6 +746,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val controller=automaticController
         if(controller!=null || automaticJournalPending)AccountSessionRuntime.session.onForeground()
         if(controller!=null) {
+            controller.returned()
+            ensureAutomaticVerification()
             if(controller.summary.phase in setOf(AutomaticRunPhase.AWAITING_VERDICT,AutomaticRunPhase.INTERRUPTED)) {
                 controller.returned();publishAutomatic()
                 if(controller.summary.phase==AutomaticRunPhase.INTERRUPTED) resolveInterruptedAutomatic(controller)
@@ -739,6 +799,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         when {
             summary.recordBound -> ensureAutomaticVerification()
             summary.pendingWrite==RunWrite.FINISH.name -> ensureAutomaticVerification()
+            controller.ledger.execution()!=null -> showMessage("上次请求结果未知，任务已保留，不会重复提交。")
             else -> discardInterruptedAutomatic(controller)
         }
     }
@@ -757,8 +818,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     private fun reconcilePendingAutomatic() {
-        if(!automaticJournalChecked || !automaticJournalPending || !accountForeground)return
-        if(state.value.busy || automaticJob?.isActive==true)return
+        if(!automaticJournalChecked || !automaticJournalPending || !accountForeground || automaticController!=null)return
+        val snapshot=state.value
+        val account=AccountSessionRuntime.session.runAccountId()
+        val ready=snapshot.loaded && snapshot.accountStorageLoaded && snapshot.config!=null && account!=null
+        if(!recoveryGate.claim(Triple(account ?: 0,snapshot.config,snapshot.connectionEpoch),ready,
+            snapshot.busy || automaticJob?.isActive==true))return
         reconcileAutomaticJournal()
     }
     private fun reconcileAutomaticJournal() {
@@ -770,6 +835,39 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 publishRestoredSummary(ledger)
                 when {
                     ledger.summary.recordBound || ledger.canResolveFinishUnknown() -> Unit
+                    ledger.execution()!=null -> {
+                        if(ledger.summary.writePending || ledger.summary.needsReconciliation) {
+                            showMessage("上次请求结果未知，任务已保留，不会重复提交。")
+                        } else {
+                            val saved=ledger.execution()!!
+                            val config=state.value.config ?: error("School configuration unavailable")
+                            check(config.config==saved.getValue("config").jsonObject) { "Configuration changed" }
+                            val requirements=restoreRequirements(saved.getValue("requirements").jsonObject)
+                            check(requirements.automaticSupported)
+                            val timeline=AutomaticRouteRun.restore(saved.getValue("timeline").jsonObject,AmapDistance(),SystemClock.elapsedRealtime())
+                            ledger.restorePaused()
+                            val account=ledger.requestContext().account
+                            val controller=AutomaticRunController(ledger,timeline,
+                                io.github.ibudaoa.capture.AutomaticRunGateway(AccountSessionRuntime.session,config,requirements),requirements.gyroscopeRequired==true,
+                                { executionAllowed() && AccountSessionRuntime.session.runAccountId()==account },{ state.value.config==config },{ SystemClock.elapsedRealtime() })
+                            controller.restoreExecution(saved)
+                            automaticController=controller;executionConfig=config.config;executionRequirements=requirements
+                            controller.persist={ saveAutomaticProgress() }
+                            restoredAutomaticLedger=null
+                            mutableState.update { it.copy(automaticRestoring=false,automaticRoute=timeline.route,automaticPosition=timeline.current()?.coordinate) };publishAutomatic()
+                            automaticJob=viewModelScope.launch {
+                                try {
+                                    while(automaticController===controller && controller.summary.phase in setOf(AutomaticRunPhase.RUNNING,AutomaticRunPhase.PAUSED,AutomaticRunPhase.FINISHING)) {
+                                        advanceAutomatic(controller);delay(500)
+                                    }
+                                    releaseAutomaticIfResolved()
+                                    if(automaticJob===currentCoroutineContext()[Job])automaticJob=null
+                                    ensureAutomaticVerification()
+                                } catch(e:CancellationException) { throw e }
+                                catch(_:Exception) { interruptAutomatic();showMessage("任务已停止推进，原记录已保留") }
+                            }
+                        }
+                    }
                     ledger.canDiscardUnverifiable() -> {
                         withContext(Dispatchers.IO) { ledger.discardUnverifiable() }
                         releasePointLock();clearAutomaticState()
@@ -780,7 +878,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             } catch(_:Exception) {
                 if(!restoreNoticeShown) { restoreNoticeShown=true;showMessage("保存的自动任务尚未核对，请导出诊断。") }
             }
-            finally { mutableState.update { it.copy(busy=false) };if(automaticJob===currentCoroutineContext()[Job])automaticJob=null;ensureAutomaticVerification() }
+            finally { if(automaticJob===currentCoroutineContext()[Job])automaticJob=null;mutableState.update { it.copy(busy=false,automaticRestoring=false) };ensureAutomaticVerification() }
         }
     }
     private suspend fun openRestoredLedger():RunTaskLedger? {
@@ -801,6 +899,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun clearAutomaticState() {
         automaticVerificationJob?.cancel();automaticVerificationJob=null
         verificationWindow=null;restoredAutomaticLedger=null
+        recoveryGate.reset()
         automaticController=null;automaticJournalPending=false;preparedRunningPlan=null;runGrant=null
         finishUnknownNotified=false;restoreNoticeShown=false
         mutableState.update { it.copy(automaticRun=AutomaticRunSummary(),automaticFailureReason=null,automaticNotice=null,
@@ -824,7 +923,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         // Apply the deadline to the read only. A confirmed verdict must finish local cleanup.
         val body=kotlinx.coroutines.withTimeoutOrNull(budgetMillis) { gateway.record(context,ledger.expectedRecord()) } ?: return
         val result=try {
-            if(!accountForeground || AccountSessionRuntime.session.runAccountId()!=context.account)return
+            if(!executionAllowed() || AccountSessionRuntime.session.runAccountId()!=context.account)return
             ledger.verifyRecord(body)
         } finally { body.fill(0) }
         mutableState.update { it.copy(
@@ -965,8 +1064,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         check(!automaticTaskOpen())
         withContext(Dispatchers.IO) { AccountSessionRuntime.initialize(getApplication());AccountSessionRuntime.session.clear() }
     }
-    fun verifyAccountSession() = operation("自动任务进行中或会话读取未完成，请稍后核对。") {
-        check(automaticController?.summary?.phase !in setOf(AutomaticRunPhase.STARTING,AutomaticRunPhase.RUNNING,AutomaticRunPhase.PAUSED,AutomaticRunPhase.FINISHING))
+    fun verifyAccountSession() {
+        if(automaticController?.summary?.blocksExternalUi==true)return
+        verifyIdleAccountSession()
+    }
+    private fun verifyIdleAccountSession() = operation("账号核对未完成，请稍后重试。") {
+        if(automaticController?.summary?.blocksExternalUi==true)return@operation
         withContext(Dispatchers.IO) { AccountSessionRuntime.initialize(getApplication()) }
         CaptureVpnService.stopOwned(getApplication())
         var remaining=60
@@ -975,6 +1078,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             return@operation
         }
         withContext(Dispatchers.IO) {
+            if(automaticController?.summary?.blocksExternalUi==true)return@withContext
             AccountSessionRuntime.session.read(AccountReadTransport(maintenance=true),System.currentTimeMillis()/1000,
                 100_000+java.security.SecureRandom().nextInt(900_000),state.value.config)
         }
@@ -1449,7 +1553,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun onForegroundLost() {
         updateClient?.close();updateJob?.cancel()
         accountForeground=false
-        interruptAutomatic()
+        if(backgroundExecution && BackgroundPolicy.unrestricted(getApplication())) {
+            mutableState.update { it.copy(displayFix=null) }
+            return
+        }
+        pauseFromOutside()
+        verificationWindow?.pause(SystemClock.elapsedRealtime())
+        automaticVerificationJob?.cancel();automaticVerificationJob=null
         runPreparationJob?.cancel();preparingRun=false;runGrant=null;preparedRunningPlan=null
         accountResumeJob?.cancel()
         AccountSessionRuntime.session.onBackground()
@@ -1481,9 +1591,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun openRunningNotification() { mutableState.update { it.copy(runNotificationEntry=it.runNotificationEntry+1) } }
+    fun refreshBackgroundPolicy() {
+        mutableState.update { it.copy(batteryUnrestricted=BackgroundPolicy.unrestricted(getApplication())) }
+    }
+
     fun onForegroundReturned() {
+        refreshBackgroundPolicy()
         if(io.github.ibudaoa.capture.CaptureReturnPolicy.shouldRelease(CaptureRuntime.state.value))CaptureVpnService.finishOnReturn(getApplication())
         accountForeground=true
+        if(automaticController==null)recoveryGate.reset()
         resumeAccount()
         mutableState.update { it.copy(session = it.session.onForegroundReturned()) }
     }

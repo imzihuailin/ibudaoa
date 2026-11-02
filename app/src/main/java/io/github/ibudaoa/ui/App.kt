@@ -179,6 +179,8 @@ fun IbudaoaApp(
     var manualIndex by rememberSaveable { mutableStateOf(0) }
     var destination by rememberSaveable { mutableStateOf(Destination.RUN) }
     var showWarmup by rememberSaveable { mutableStateOf(false) }
+    var skippedBattery by remember(showWarmup) { mutableStateOf(false) }
+    val batteryPassed = state.batteryUnrestricted || skippedBattery
     var handledWarmupReason by rememberSaveable { mutableStateOf<String?>(null) }
     var showSummary by rememberSaveable { mutableStateOf(false) }
     var confirmClear by rememberSaveable { mutableStateOf(false) }
@@ -201,6 +203,9 @@ fun IbudaoaApp(
         }
     }
     val foreground = LocalLifecycleOwner.current.lifecycle.currentStateAsState().value.isAtLeast(Lifecycle.State.RESUMED)
+    LaunchedEffect(state.runNotificationEntry) {
+        if(state.runNotificationEntry>0)destination=Destination.RUN
+    }
     val warmupReason = WarmupPolicy.reason(state)
     LaunchedEffect(warmupReason, foreground, state.accountSession.phase, showWarmup, roads) {
         if (roads != null && foreground && warmupReason != null && handledWarmupReason != warmupReason.name) {
@@ -220,7 +225,7 @@ fun IbudaoaApp(
         roads?.ready == true, state.locationGranted)
     LaunchedEffect(showWarmup, foreground, state.loaded, state.capture.active, state.capturedConfig, state.captureRevision,
         state.busy, state.mapConsent, state.locationGranted, state.locationStartupPending, state.roadReport, state.certificateSetup, state.preparationError,
-        state.preparationCompleted, state.accountStorageLoaded, state.accountSession.phase, roads) {
+        state.preparationCompleted, state.accountStorageLoaded, state.accountSession.phase, roads, batteryPassed) {
         if (showWarmup && state.loaded && !state.locationStartupPending && foreground && !state.busy && !state.capture.active && state.capture.phase != CapturePhase.ERROR &&
             state.capturedConfig && state.captureRevision == DiagnosticStore.CURRENT_CAPTURE_REVISION &&
             !needsCertificateSetup(state.certificateSetup, state.capturedConfig, state.certificateTrusted, false) &&
@@ -234,10 +239,10 @@ fun IbudaoaApp(
         } else if (roads != null && (showWarmup || state.preparationCompleted) && WarmupPolicy.ready(state) && foreground && state.locationGranted && state.mapConsent &&
             !state.busy && !state.capture.active && state.capture.phase != CapturePhase.ERROR &&
             !needsCertificateSetup(state.certificateSetup, state.capturedConfig, state.certificateTrusted, false)) {
-            if (finishAfterLocation && roads.ready) {
+            if (finishAfterLocation && roads.ready && batteryPassed) {
                 finishAfterLocation = false
                 showWarmup = false
-            } else if (automaticStep == PreparationStep.CHECK_ROADS && !WarmupPolicy.needsLogin(state) && attemptedRoadScope != roadScopeKey && state.preparationError == null &&
+            } else if (automaticStep == PreparationStep.CHECK_ROADS && (!showWarmup || batteryPassed) && !WarmupPolicy.needsLogin(state) && attemptedRoadScope != roadScopeKey && state.preparationError == null &&
                 roads.report?.phase !in setOf(RoadBatchPhase.FAILED, RoadBatchPhase.INTERRUPTED)) {
                 attemptedRoadScope = roadScopeKey
                 onAcknowledgePreparation()
@@ -390,6 +395,8 @@ fun IbudaoaApp(
     if (WarmupPolicy.ready(state) && showWarmup) {
         WarmupDialog(
             state = state,
+            batterySkipped = skippedBattery,
+            onSkipBattery = { skippedBattery = true },
             onContinue = {
                 if (roads == null) return@WarmupDialog
                 if (!WarmupPolicy.needsLogin(state) && state.locationGranted && state.mapConsent && roads?.ready == true && !state.busy && !state.capture.active && state.capture.phase != CapturePhase.ERROR &&
@@ -693,7 +700,7 @@ internal fun MapPage(
                             io.github.ibudaoa.running.AutomaticRunPhase.AWAITING_VERDICT -> "记录已创建，等待核对平台判定"
                             io.github.ibudaoa.running.AutomaticRunPhase.VALID -> "平台已确认本次记录有效"
                             io.github.ibudaoa.running.AutomaticRunPhase.INVALID -> "本次记录未被判定有效"
-                            io.github.ibudaoa.running.AutomaticRunPhase.INTERRUPTED -> "自动任务已中断，需核对原记录"
+                            io.github.ibudaoa.running.AutomaticRunPhase.INTERRUPTED -> if(state.automaticRestoring) "正在恢复上次任务" else "自动任务已中断，需核对原记录"
                             else -> "自动执行准备未完成，请导出诊断"
                         },style=MaterialTheme.typography.bodySmall)
                         if(auto.phase!=io.github.ibudaoa.running.AutomaticRunPhase.INVALID)
@@ -756,8 +763,9 @@ internal fun MapPage(
                         else -> onWarmup
                     },
                     modifier = Modifier.fillMaxWidth().heightIn(min = 60.dp),shape = RoundedCornerShape(30.dp),
-                    enabled = !state.busy && !verifying) {
+                    enabled = !state.busy && !verifying && !state.automaticRestoring) {
                     Text(when {
+                        state.automaticRestoring -> "正在恢复"
                         finished -> "完成"
                         verifying -> "核验中"
                         active -> if(auto.recordBound) "核对本次记录" else "结束本次任务"
@@ -772,7 +780,7 @@ internal fun MapPage(
                     },style=MaterialTheme.typography.titleLarge)
                 }
             }
-            if(runningPage)Text("运行时请保持屏幕常亮", Modifier.fillMaxWidth().padding(vertical = 14.dp),
+            if(runningPage && !state.batteryUnrestricted)Text("运行时请保持屏幕常亮", Modifier.fillMaxWidth().padding(vertical = 14.dp),
                 style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center, color = colors.onSurfaceVariant)
         }
     }
@@ -874,7 +882,8 @@ private fun ToolCard(title: String, subtitle: String, icon: ImageVector, trailin
 }
 
 @Composable
-internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: () -> Unit) {
+internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: () -> Unit,
+    batterySkipped: Boolean = false, onSkipBattery: () -> Unit = {}) {
     val preparation = rememberRoadPreparation(state)
     val setup = state.certificateSetup
     val certificateStep = needsCertificateSetup(setup, state.capturedConfig, state.certificateTrusted, state.capture.active)
@@ -883,11 +892,12 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
     val needsCapture = WarmupPolicy.needsLogin(state) || !state.capturedConfig || state.captureRevision != DiagnosticStore.CURRENT_CAPTURE_REVISION
     val accountReady = !certificateStep && !capture.active && !needsCapture && capture.phase != CapturePhase.ERROR
     val locationStep = accountReady && (!state.locationGranted || !state.mapConsent)
-    val roadStep = accountReady && !locationStep
+    val batteryStep = accountReady && !locationStep && !state.batteryUnrestricted && !batterySkipped
+    val roadStep = accountReady && !locationStep && !batteryStep
     val ready = roadStep && preparation?.ready == true && !state.busy
     val failed = roadStep && !state.busy && (state.preparationError != null ||
         roads?.phase in setOf(RoadBatchPhase.FAILED, RoadBatchPhase.INTERRUPTED, RoadBatchPhase.COMPLETE) && !ready)
-    val current = when { certificateStep -> 0; !accountReady -> 1; locationStep -> 2; ready -> 4; else -> 3 }
+    val current = when { certificateStep -> 0; !accountReady -> 1; locationStep -> 2; batteryStep -> 3; ready -> 5; else -> 4 }
     val heading = when {
         certificateStep -> when (setup) {
             CertificateSetupPhase.CHECK_FAILED -> "暂时无法检查证书，请重试。"
@@ -898,6 +908,7 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
         capture.phase == CapturePhase.FINALIZING -> capture.message
         capture.phase == CapturePhase.ERROR && !roadStep -> capture.message
         !BuildConfig.MAP_KEY_CONFIGURED && roadStep -> "地图服务尚未配置，暂时无法核对道路。"
+        batteryStep -> "省电策略设置为无限制后才可以后台运行"
         locationStep -> "开启定位"
         WarmupPolicy.needsLogin(state) -> "登录已失效，请重新登录"
         failed -> state.preparationError ?: if (roads?.phase == RoadBatchPhase.INTERRUPTED) "道路核对已中断，请重试。" else "道路核对未完成，请重试。"
@@ -938,10 +949,10 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
                     Text("跑前热身", Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
                         style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(10.dp))
-                    Text("已完成 $current / 4 项", Modifier.fillMaxWidth(),
+                    Text("已完成 ${current - if (batterySkipped && !state.batteryUnrestricted && current > 3) 1 else 0} / 5 项", Modifier.fillMaxWidth(),
                         textAlign = TextAlign.Center, style = MaterialTheme.typography.bodyLarge)
                     Spacer(Modifier.height(32.dp))
-                    Stepper(current)
+                    Stepper(current, state.batteryUnrestricted)
                     Spacer(Modifier.height(28.dp))
                     HorizontalDivider()
                     Spacer(Modifier.height(28.dp))
@@ -977,7 +988,14 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
                     }
                 }
                 Spacer(Modifier.height(20.dp))
-                Button(onClick = onContinue, enabled = enabled,
+                if (batteryStep) {
+                    val context = androidx.compose.ui.platform.LocalContext.current
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        androidx.compose.material3.OutlinedButton(onClick = onSkipBattery, modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text("跳过") }
+                        Button(onClick = { io.github.ibudaoa.running.BackgroundPolicy.openSettings(context) },
+                            modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text("去设置") }
+                    }
+                } else Button(onClick = onContinue, enabled = enabled,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp), shape = RoundedCornerShape(28.dp)) {
                     Text(button, style = MaterialTheme.typography.titleLarge)
                 }
@@ -996,21 +1014,21 @@ private fun formatRuleTime(seconds: Int): String = if (seconds % 60 == 0)
 private fun formatPace(seconds: Int): String = String.format(Locale.ROOT, "%d′%02d″", seconds / 60, seconds % 60)
 
 @Composable
-private fun Stepper(current: Int) {
-    val labels = listOf("授权准备", "连接账号", "开启定位", "运行准备")
+private fun Stepper(current: Int, batteryComplete: Boolean = true) {
+    val labels = listOf("授权准备", "连接账号", "开启定位", "熄屏显示", "运行准备")
     val colors = MaterialTheme.colorScheme
     Box(Modifier.fillMaxWidth()) {
         Canvas(Modifier.fillMaxWidth().height(36.dp)) {
             val unit = size.width / labels.size
             repeat(labels.size - 1) { index ->
-                drawLine(if (index < current) colors.primary else colors.outlineVariant,
+                drawLine(if (index < current && (index != 3 || batteryComplete)) colors.primary else colors.outlineVariant,
                     Offset(unit * (index + 0.5f), size.height / 2),
                     Offset(unit * (index + 1.5f), size.height / 2), strokeWidth = 2.dp.toPx())
             }
         }
         Row(Modifier.fillMaxWidth()) {
             labels.forEachIndexed { index, label ->
-                val completed = index < current
+                val completed = index < current && (index != 3 || batteryComplete)
                 Column(Modifier.weight(1f).semantics {
                     contentDescription = "$label，${if (completed) "已完成" else if (index == current) "当前步骤" else "未完成"}"
                 }, horizontalAlignment = Alignment.CenterHorizontally) {

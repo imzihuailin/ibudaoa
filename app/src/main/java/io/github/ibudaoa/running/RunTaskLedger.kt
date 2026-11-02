@@ -40,6 +40,12 @@ internal class RunTaskLedger private constructor(private val journal:RunTaskJour
         try { journal.save(bytes) } catch(e:Exception) { storageFailed=true;throw e } finally { bytes.fill(0) }
         checkpoint=result;storageFailed=false
     }
+    @Synchronized fun saveExecution(value:JsonObject) { save(mapOf("execution" to value)) }
+    @Synchronized fun execution():JsonObject? = checkpoint["execution"] as? JsonObject
+    @Synchronized fun restorePaused() {
+        check(!summary.writePending && execution()!=null && !summary.recordBound)
+        foreground=true;save(mapOf("phase" to JsonPrimitive(RunTaskPhase.PAUSED.name)))
+    }
     @Synchronized fun begin(operation:RunWrite):RunWritePermit {
         check(!closed && !storageFailed && foreground && permit==null && text("pending")==null)
         val phase=summary.phase
@@ -247,7 +253,7 @@ internal class RunTaskLedger private constructor(private val journal:RunTaskJour
         fun restore(journal:RunTaskJournal,account:Long):RunTaskLedger? {
             val bytes=journal.load() ?: return null
             val checkpoint=try {
-                require(bytes.size in 1..16_384)
+                require(bytes.size in 1..RunTaskJournalCipher.MAX_BYTES)
                 val o=Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)) as JsonObject
                 require(account>0 && o["account"]?.jsonPrimitive?.longOrNull==account) { "Run checkpoint belongs to a different account" }
                 require(o["schema"]?.jsonPrimitive?.intOrNull==1)
@@ -270,7 +276,7 @@ internal class RunTaskLedger private constructor(private val journal:RunTaskJour
             val ledger=RunTaskLedger(journal,checkpoint)
             ledger.foreground=false
             if(ledger.text("pending")!=null) ledger.save(mapOf("phase" to JsonPrimitive(RunTaskPhase.WRITE_UNCERTAIN.name)))
-            else if(ledger.summary.phase !in setOf(RunTaskPhase.AWAITING_VERDICT,RunTaskPhase.VALID,RunTaskPhase.INVALID))
+            else if(ledger.execution()==null && ledger.summary.phase !in setOf(RunTaskPhase.AWAITING_VERDICT,RunTaskPhase.VALID,RunTaskPhase.INVALID))
                 ledger.save(mapOf("phase" to JsonPrimitive(RunTaskPhase.INTERRUPTED.name)))
             return ledger
         }

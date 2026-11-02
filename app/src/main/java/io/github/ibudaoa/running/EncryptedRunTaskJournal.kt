@@ -14,7 +14,7 @@ import javax.crypto.spec.GCMParameterSpec
 
 /** Separate key, authenticated domain and backup-excluded file from the account vault. */
 internal object RunTaskJournalCipher {
-    const val MAX_BYTES=16_384
+    const val MAX_BYTES=8_388_608
     private const val MAGIC=0x49425231
     private val aad="ibudaoa.run-task.v1".toByteArray(Charsets.US_ASCII)
     fun seal(plain:ByteArray,key:SecretKey):ByteArray {

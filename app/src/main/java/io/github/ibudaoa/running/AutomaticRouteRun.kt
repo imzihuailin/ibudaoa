@@ -4,6 +4,8 @@ import io.github.ibudaoa.domain.CampusCoordinate
 import io.github.ibudaoa.domain.PlatformDistance
 import io.github.ibudaoa.roads.FixedPointRoute
 import kotlin.math.ceil
+import kotlinx.serialization.json.*
+import io.github.ibudaoa.roads.*
 
 enum class RunFinishStage { VALIDATION, STORAGE_REQUEST, STORAGE_DECODE, FILE_BUILD, TRACK_UPLOAD, MOTION_UPLOAD, FINISH_REQUEST, FINISH_RESPONSE }
 enum class AutomaticVerificationState { WAITING, VERIFYING, MANUAL }
@@ -24,8 +26,8 @@ internal class AutomaticRunSample(val coordinate:CampusCoordinate,val activeMill
 internal class AutomaticCheckpoint(val id:String,val sample:AutomaticRunSample) {
     override fun toString()="AutomaticCheckpoint(generated)"
 }
-internal class AutomaticRouteRun(route:FixedPointRoute,points:Map<String,CampusCoordinate>,private val radius:Double,
-    private val metric:PlatformDistance,paceSecondsPerKm:Int) {
+internal class AutomaticRouteRun(val route:FixedPointRoute,points:Map<String,CampusCoordinate>,private val radius:Double,
+    private val metric:PlatformDistance,val paceSecondsPerKm:Int) {
     private val fixedPoints=points.toMap()
     private val polyline=mutableListOf<CampusCoordinate>()
     private val cumulative=mutableListOf(0.0)
@@ -112,6 +114,43 @@ internal class AutomaticRouteRun(route:FixedPointRoute,points:Map<String,CampusC
     }
     @Synchronized fun completion():AutomaticRunSnapshot = completed ?: error("Run is not frozen")
     @Synchronized fun inspection():AutomaticRunSnapshot = completed ?: AutomaticRunSnapshot(samples,visits.values.toList(),fixedPoints.keys,elapsed,active)
+    @Synchronized fun checkpoint():JsonObject = buildJsonObject {
+        put("v",1);put("radius",radius);put("pace",paceSecondsPerKm)
+        put("scope",buildJsonArray { add(route.scope.connectionEpoch);add(route.scope.schoolId);add(route.scope.termId);add(route.scope.zoneId);add(route.scope.configHash) })
+        put("fingerprint",route.roadFingerprint);put("min",route.minimumTargetMeters);put("max",route.maximumTargetMeters)
+        put("ids",JsonArray(route.selectedIds.map(::JsonPrimitive)))
+        put("points",buildJsonObject { fixedPoints.forEach { (id,p) -> put(id,buildJsonArray { add(p.latitude);add(p.longitude) }) } })
+        put("line",buildJsonArray { polyline.forEach { p -> add(buildJsonArray { add(p.latitude);add(p.longitude) }) } })
+        put("elapsed",elapsed);put("active",active);put("saved",System.currentTimeMillis())
+        put("samples",buildJsonArray { samples.forEach { p -> add(buildJsonArray { add(p.coordinate.latitude);add(p.coordinate.longitude);add(p.activeMillis);add(p.elapsedMillis);add(p.meters);add(p.speed) }) } })
+        put("visits",buildJsonObject { visits.forEach { (id,v) -> put(id,samples.indexOf(v.sample)) } })
+    }
+    companion object {
+        fun restore(o:JsonObject,metric:PlatformDistance,now:Long):AutomaticRouteRun {
+            require(o.getValue("v").jsonPrimitive.int==1)
+            fun coord(a:JsonArray)=CampusCoordinate(a[0].jsonPrimitive.double,a[1].jsonPrimitive.double)
+            val a=o.getValue("scope").jsonArray
+            val scope=RoadScope(a[0].jsonPrimitive.long,a[1].jsonPrimitive.long,a[2].jsonPrimitive.long,a[3].jsonPrimitive.long,a[4].jsonPrimitive.content)
+            val ids=o.getValue("ids").jsonArray.map { it.jsonPrimitive.content }
+            val points=o.getValue("points").jsonObject.mapValues { coord(it.value.jsonArray) }
+            val line=o.getValue("line").jsonArray.map { coord(it.jsonArray) }
+            val route=FixedPointRoute(scope,o.getValue("fingerprint").jsonPrimitive.content,ids,ids.first(),ids,
+                listOf(ObservedRoadEdge(ids.first(),ids.last(),line,line.zipWithNext().sumOf { (x,y)->metric.meters(x,y) })),
+                0.0,Double.MAX_VALUE,o.getValue("min").jsonPrimitive.double,o.getValue("max").jsonPrimitive.double,includesReviewedOrigin=true)
+            return AutomaticRouteRun(route,points,o.getValue("radius").jsonPrimitive.double,metric,o.getValue("pace").jsonPrimitive.int).apply {
+                elapsed=o.getValue("elapsed").jsonPrimitive.long + (System.currentTimeMillis()-o.getValue("saved").jsonPrimitive.long).coerceAtLeast(0)
+                active=o.getValue("active").jsonPrimitive.long
+                require(active in 0..durationMillis && elapsed>=active)
+                val restored=o.getValue("samples").jsonArray
+                require(restored.size in 1..20_000)
+                restored.forEach { value -> val v=value.jsonArray
+                    samples.add(AutomaticRunSample(coord(v),v[2].jsonPrimitive.long,v[3].jsonPrimitive.long,v[4].jsonPrimitive.double,v[5].jsonPrimitive.double)) }
+                o.getValue("visits").jsonObject.forEach { (id,index) -> require(id in points);visits[id]=AutomaticCheckpoint(id,samples[index.jsonPrimitive.int]) }
+                require(samples.zipWithNext().all { (x,y)->y.elapsedMillis>x.elapsedMillis && y.activeMillis>=x.activeMillis })
+                nextSample=(active/500+1)*500;lastClock=now;phase=AutomaticRunPhase.PAUSED
+            }
+        }
+    }
     private fun append(at:Long,wallElapsed:Long=(elapsed-(active-at)).coerceAtLeast(0),stationary:Boolean=false) {
         if(samples.lastOrNull()?.let { it.activeMillis==at && it.elapsedMillis==wallElapsed }==true)return
         val meters=totalMeters*at/durationMillis

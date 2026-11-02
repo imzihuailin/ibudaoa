@@ -62,3 +62,14 @@ data class RunRuntimeRequirements(val runChecks:RuntimeCheckShape=RuntimeCheckSh
         }.getOrElse { RunRuntimeRequirements() }
     }
 }
+
+internal fun RunRuntimeRequirements.checkpoint():JsonObject = buildJsonObject {
+    put("run",runChecks.name);put("android",androidChecks.name);put("gyro",gyroscopeRequired?.let(::JsonPrimitive) ?: JsonNull)
+    put("verification",verificationSupported);put("device",deviceCheck.name);put("gee",geeDeviceCheck.name);put("time",timeCheck.name)
+    put("checks",buildJsonObject { verificationChecks.forEach { (k,v)->put(k,v.name) } })
+}
+internal fun restoreRequirements(o:JsonObject):RunRuntimeRequirements = RunRuntimeRequirements(
+    RuntimeCheckShape.valueOf(o.getValue("run").jsonPrimitive.content), RuntimeCheckShape.valueOf(o.getValue("android").jsonPrimitive.content),
+    o["gyro"]?.jsonPrimitive?.booleanOrNull,o.getValue("verification").jsonPrimitive.boolean,
+    RuntimeSwitch.valueOf(o.getValue("device").jsonPrimitive.content),RuntimeSwitch.valueOf(o.getValue("gee").jsonPrimitive.content),
+    RuntimeSwitch.valueOf(o.getValue("time").jsonPrimitive.content),o.getValue("checks").jsonObject.mapValues { RuntimeSwitch.valueOf(it.value.jsonPrimitive.content) })

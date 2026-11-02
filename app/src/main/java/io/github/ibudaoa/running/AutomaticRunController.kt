@@ -3,6 +3,7 @@ package io.github.ibudaoa.running
 import io.github.ibudaoa.capture.AutomaticRunGateway
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.serialization.json.*
 
 internal sealed interface AutomaticFinishReview {
     data object Allowed : AutomaticFinishReview
@@ -15,6 +16,7 @@ internal class AutomaticRunController(val ledger:RunTaskLedger,val timeline:Auto
     private val preparationCurrent:()->Boolean,private val clock:()->Long) {
     @Volatile private var foreground=true
     @Volatile private var starting=false
+    var persist:()->Unit = {}
     private val operations=Mutex()
     private var lastUpload=-1L
     private val acknowledgedIds=java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
@@ -37,6 +39,18 @@ internal class AutomaticRunController(val ledger:RunTaskLedger,val timeline:Auto
         return AutomaticRunSummary(phase,timeline.current()?.meters ?: 0.0,timeline.totalMeters,timeline.elapsedMillis/1000,
             timeline.checkpoints().size,requiredPoints,task.platformStarted,task.recordBound,task.recordVerified,problem,ledger.serverPointCount(),ledger.serverRecordStatus(),
             ((timeline.durationMillis-timeline.activeMillis).coerceAtLeast(0)+999)/1000,ledger.pendingWrite()?.name,ledger.finishStage(),ledger.identityChecks(),ruleProblems,acknowledgedIds.size)
+    }
+    fun saveExecution(config:JsonObject,requirements:RunRuntimeRequirements) {
+        ledger.saveExecution(buildJsonObject {
+            put("timeline",timeline.checkpoint());put("config",config);put("requirements",requirements.checkpoint())
+            put("gyro",gyroRequired);put("lastUpload",lastUpload)
+            put("ack",JsonArray(acknowledgedIds.map(::JsonPrimitive)))
+        })
+    }
+    fun restoreExecution(o:JsonObject) {
+        lastUpload=o.getValue("lastUpload").jsonPrimitive.long
+        acknowledgedIds.addAll(o.getValue("ack").jsonArray.map { it.jsonPrimitive.content })
+        desiredPause=true
     }
     suspend fun start():Boolean {
         if(!operations.tryLock())return false
@@ -190,11 +204,12 @@ internal class AutomaticRunController(val ledger:RunTaskLedger,val timeline:Auto
     private suspend fun reportLocation(point:AutomaticRunSample):Boolean {
         val ids=timeline.checkpointIdsAt(point)
         return send(RunWrite.LOCATION,point).also { ok ->
-            if(ok) { acknowledgedIds.addAll(ids);lastUpload=point.elapsedMillis }
+            if(ok) { acknowledgedIds.addAll(ids);lastUpload=point.elapsedMillis;persist() }
         }
     }
     private suspend fun send(kind:RunWrite,location:AutomaticRunSample?=null):Boolean {
         if(!foreground || !bound())return false
+        if(timeline.current()!=null)persist()
         val permit=ledger.begin(kind)
         return try {
             val body=gateway.write(kind,ledger.requestContext(),timeline,ledger::markFinishStage,location)

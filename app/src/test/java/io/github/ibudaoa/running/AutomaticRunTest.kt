@@ -27,6 +27,50 @@ class AutomaticRunTest {
         listOf(ObservedRoadEdge("origin","21",listOf(p(-100.0),p(0.0)),100.0),ObservedRoadEdge("21","22",listOf(p(0.0),p(100.0)),100.0)),
         200.0,200.0,150.0,1000.0,includesReviewedOrigin=true,originAccessMeters=100.0)
     private fun timeline()=AutomaticRouteRun(route(),points,5.0,metric,200)
+    @Test fun persistedTimelineRestoresPausedWithoutAddingDistance() {
+        val original=timeline()
+        original.start(1000);original.advance(6500);original.pause(6500)
+        val restored=AutomaticRouteRun.restore(original.checkpoint(),metric,90000)
+        assertEquals(AutomaticRunPhase.PAUSED,restored.phase)
+        assertEquals(original.paceSecondsPerKm,restored.paceSecondsPerKm)
+        assertEquals(original.activeMillis,restored.activeMillis)
+        assertEquals(original.current()!!.meters,restored.current()!!.meters,0.00001)
+        restored.advance(120000)
+        assertEquals(original.activeMillis,restored.activeMillis)
+        restored.resume(120000);restored.advance(121000)
+        assertEquals(original.activeMillis+1000,restored.activeMillis)
+        assertTrue(restored.elapsedMillis>=original.elapsedMillis+31000)
+    }
+    @Test fun ledgerWithExecutionSurvivesProcessRestoreAsPaused() = runBlocking {
+        val h=Harness();assertTrue(h.controller.start())
+        h.clock+=1500;h.controller.tick()
+        h.controller.saveExecution(config.config,requirements())
+        val ledger=RunTaskLedger.restore(h.journal,42)!!
+        assertNotNull(ledger.execution())
+        assertFalse(ledger.summary.needsReconciliation)
+        ledger.restorePaused()
+        assertEquals(RunTaskPhase.PAUSED,ledger.summary.phase)
+    }
+    @Test fun pausedTimelineHasNoAutomaticTimeout() {
+        val run=timeline();run.start(1000);run.advance(2000);run.pause(2000)
+        val distance=run.current()!!.meters
+        run.advance(2000+3*86_400_000L)
+        assertEquals(AutomaticRunPhase.PAUSED,run.phase)
+        assertEquals(distance,run.current()!!.meters,0.00001)
+    }
+    @Test fun unknownWriteWithSavedExecutionCannotRestoreAsPaused() = runBlocking {
+        val h=Harness();assertTrue(h.controller.start())
+        h.controller.saveExecution(config.config,requirements())
+        h.ledger.begin(RunWrite.LOCATION)
+        val restored=RunTaskLedger.restore(h.journal,42)!!
+        assertTrue(restored.summary.needsReconciliation)
+        assertTrue(restored.summary.writePending)
+        try { restored.restorePaused();fail("Unknown write must not permit resume") }
+        catch(_:IllegalStateException) { }
+    }
+    @Test fun runtimeRequirementCheckpointPreservesAllChecks() {
+        assertEquals(requirements(),restoreRequirements(requirements().checkpoint()))
+    }
     private fun permissiveConfig()=config.copy(config=JsonObject(config.config+mapOf("time_rule_arr" to JsonArray(listOf(buildJsonObject {
         put("start_time",21600);put("end_time",79200);put("min_distance",0.1);put("max_distance",1)
         put("max_pace",180);put("min_pace",540);put("min_log_num",2);put("point_num_online",2);put("point_num_offline",0)
