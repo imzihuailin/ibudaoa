@@ -28,8 +28,8 @@ android {
         applicationId = "io.github.ibudaoa"
         minSdk = 29
         targetSdk = 36
-        versionCode = 97
-        versionName = "0.22.5-run-notification"
+        versionCode = 98
+        versionName = "1.0.0"
         manifestPlaceholders["amapAndroidKey"] = localMapKey
         buildConfigField("boolean", "MAP_KEY_CONFIGURED", localMapKey.isNotEmpty().toString())
         buildConfigField("String", "REPOSITORY_URL", "\"$localRepositoryUrl\"")

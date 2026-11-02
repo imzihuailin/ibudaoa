@@ -2,6 +2,9 @@
 # Internal instructions, docs, mockups and analysis stay local.
 /*
 !/.gitignore
+!/README.md
+!/LICENSE
+!/THIRD_PARTY_NOTICES.md
 !/app/
 !/gradle/
 !/build.gradle.kts
