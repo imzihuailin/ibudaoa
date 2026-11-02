@@ -4,9 +4,8 @@ Kotlin + Jetpack Compose 编写的 Android 校园跑应用，包含账号连接�
 
 ## 安装
 
-发行版将通过 GitHub Releases 提供。首次公开版本为 **v1.0.0**。
-支持 Android 10 及以上、arm64-v8a 设备。下载发行 APK 的用户无需自行配置地图 Key。
-沿用原签名，已有用户可覆盖升级；请勿为了更新卸载应用。
+本仓库仅提供源码，不提供预编译 APK。使用者需要自行配置高德地图 Key 和签名并构建。
+支持 Android 10 及以上、arm64-v8a 设备。自行签名的 APK 无法覆盖使用其他签名安装的版本。
 
 ## 使用与限制
 
@@ -26,7 +25,7 @@ Kotlin + Jetpack Compose 编写的 Android 校园跑应用，包含账号连接�
 
 需要 JDK 17、Android SDK 36、Build Tools 35.0.0；使用仓库中的 Gradle Wrapper。
 在不入库的 `local.properties` 中配置 `sdk.dir`、`amap.android.key` 和 `project.repository.url`。
-地图 Key 应绑定构建使用的包名及签名。源码构建者应使用自己的 Key 和签名，不能覆盖安装官方发行签名的 APK。
+地图 Key 应绑定构建使用的包名及签名。源码构建者应使用自己的 Key 和签名，并遵守高德的服务条款。
 当前构建脚本读取 `.local/signing/debug.keystore`，该名称为历史遗留；需自行准备兼容脚本签名配置的本地密钥。发行维护者必须安全保管原有密钥。
 
 ```sh
