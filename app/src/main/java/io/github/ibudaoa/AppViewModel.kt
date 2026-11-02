@@ -125,7 +125,7 @@ internal val AppState.preparationRoadsReady: Boolean
 private data class RoadComputation(val base: ObservedRoadGraph?, val graph: ObservedRoadGraph?,
     val route: RoutePlanResult?, val plan: RoadGapPlan?)
 
-enum class CaptureAction { REQUEST_VPN, OPEN_OFFICIAL, STOP_CAPTURE }
+enum class CaptureAction { OPEN_CERTIFICATE_SETTINGS, REQUEST_VPN, OPEN_OFFICIAL, STOP_CAPTURE }
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val store = DiagnosticStore(application)
@@ -1192,7 +1192,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (!certificateGate.accepts(setupGeneration) || !captureFlowActive) return@operation
                 mutableState.update { it.copy(certificateFileName = file.fileName, certificateSetup = CertificateSetupPhase.WAITING_INSTALL) }
-                certificateGate.waiting(setupGeneration)
+                if (certificateGate.waiting(setupGeneration)) sendCaptureAction(CaptureAction.OPEN_CERTIFICATE_SETTINGS)
             }
         }
     }

@@ -918,8 +918,9 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
     val button = when {
         certificateStep -> when (setup) {
             CertificateSetupPhase.CHECK_FAILED, CertificateSetupPhase.SAVE_FAILED -> "重试"
-            CertificateSetupPhase.WAITING_INSTALL, CertificateSetupPhase.NOT_INSTALLED -> "已安装，继续"
+            CertificateSetupPhase.WAITING_INSTALL, CertificateSetupPhase.NOT_INSTALLED -> "去安装"
             CertificateSetupPhase.CHECKING, CertificateSetupPhase.SAVING -> "正在准备…"
+            CertificateSetupPhase.IDLE -> "去安装"
             else -> "开始配置"
         }
         locationStep -> "开启定位"
@@ -958,8 +959,9 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
                     Spacer(Modifier.height(28.dp))
                     if (certificateStep && setup in setOf(CertificateSetupPhase.IDLE, CertificateSetupPhase.WAITING_INSTALL, CertificateSetupPhase.NOT_INSTALLED)) {
                         val name = state.certificateFileName ?: "ibudaoa-连接证书.cer.crt"
-                        Text("1.在手机设置里搜索并打开“安装证书”这个选项\n\n2.选择CA证书\n\n3.在Download文件夹里找到“$name”并安装",
+                        Text("1.选择CA证书\n\n2.授权安装\n\n3.在Download文件夹找到\"ibudaoa-连接证书\"并安装",
                             style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        if (name != "ibudaoa-连接证书.cer.crt") Text("实际文件名：$name")
                     } else if (!certificateStep && capture.phase != CapturePhase.ERROR &&
                         (capture.active || needsCapture) && capture.phase != CapturePhase.FINALIZING) {
                         Text("1.允许临时VPN\n\n2.在乐跑界面（就是那个大鸟的界面）停几秒\n\n3.等待自动跳转回来",

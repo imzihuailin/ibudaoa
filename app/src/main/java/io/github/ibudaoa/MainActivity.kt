@@ -100,6 +100,27 @@ class MainActivity : ComponentActivity() {
         else model.showMessage("未授予 VPN 连接权限，采集未启动。")
     }
 
+    private fun openCertificateSettings() {
+        val intents = listOf(
+            android.content.Intent().setClassName("com.android.settings", "com.android.settings.SubSettings")
+                .putExtra(":settings:show_fragment", "com.android.settings.security.InstallCertificateFromStorage"),
+            android.content.Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS),
+            android.content.Intent(android.provider.Settings.ACTION_SETTINGS)
+        )
+        for ((index, intent) in intents.withIndex()) {
+            try {
+                startActivity(intent)
+                if (index > 0) model.showMessage("请在设置中搜索‘安装证书’，选择CA证书")
+                return
+            } catch (_: android.content.ActivityNotFoundException) {
+                // Try the next system settings entry.
+            } catch (_: SecurityException) {
+                // Vendor settings may reject external callers.
+            }
+        }
+        model.showMessage("无法打开设置，请手动在设置中搜索‘安装证书’，选择CA证书")
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         locationRequestInFlight = savedInstanceState?.getBoolean("location-request-in-flight") ?: false
@@ -110,6 +131,7 @@ class MainActivity : ComponentActivity() {
                 model.captureActions.collect { action ->
                     if (action != CaptureAction.STOP_CAPTURE && !model.captureRequested) return@collect
                     when (action) {
+                        CaptureAction.OPEN_CERTIFICATE_SETTINGS -> openCertificateSettings()
                         CaptureAction.REQUEST_VPN -> requestVpn()
                         CaptureAction.OPEN_OFFICIAL -> openOfficial()
                         CaptureAction.STOP_CAPTURE -> CaptureVpnService.stopOwned(this@MainActivity)
