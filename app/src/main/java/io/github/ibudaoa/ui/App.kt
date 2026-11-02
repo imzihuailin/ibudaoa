@@ -714,10 +714,10 @@ internal fun MapPage(
                         }
                     }
                 }
-                val verifying=auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.STARTING,
+                val verifying=auto.verification==io.github.ibudaoa.running.AutomaticVerificationState.VERIFYING || auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.STARTING,
                     io.github.ibudaoa.running.AutomaticRunPhase.FINISHING,io.github.ibudaoa.running.AutomaticRunPhase.AWAITING_VERDICT)
                 val finished=auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.VALID,io.github.ibudaoa.running.AutomaticRunPhase.INVALID)
-                val finishUnknown=active && !auto.recordBound && auto.pendingWrite=="FINISH"
+                val finishUnknown=auto.manualConfirmationAvailable
                 if(finishUnknown) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         Button(onClick = onDiscardAutomatic, modifier = Modifier.weight(1f).heightIn(min = 60.dp),

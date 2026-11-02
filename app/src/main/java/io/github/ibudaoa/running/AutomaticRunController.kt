@@ -151,14 +151,8 @@ internal class AutomaticRunController(val ledger:RunTaskLedger,val timeline:Auto
                 } catch(e:CancellationException) { ledger.uncertain(permit);throw e }
                 catch(_:Exception) { ledger.uncertain(permit);problem="ASSOCIATION_UNCERTAIN";return false }
             }
-            val delays = longArrayOf(0L, 5_000L, 15_000L, 30_000L, 60_000L)
-            for (wait in delays) {
-                if (wait > 0) kotlinx.coroutines.delay(wait)
-                if (!foreground || !bound()) return false
-                if (queryLocked()) return true
-                if (ledger.summary.phase == RunTaskPhase.INVALID || problem == "RECORD_MISMATCH") return false
-            }
-            return false
+            // The ViewModel owns the bounded verification window for live and restored tasks.
+            return true
         } finally { finishing=false }
     }
     suspend fun query():Boolean {

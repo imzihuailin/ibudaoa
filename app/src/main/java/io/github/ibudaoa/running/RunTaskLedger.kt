@@ -164,13 +164,21 @@ internal class RunTaskLedger private constructor(private val journal:RunTaskJour
     @Synchronized fun canResolveFinishUnknown():Boolean = !closed && !storageFailed && foreground &&
         number("record")==null && text("pending")==RunWrite.FINISH.name &&
         summary.phase in setOf(RunTaskPhase.WRITE_UNCERTAIN,RunTaskPhase.INTERRUPTED)
+    /** Eligibility only; the coordinator must additionally require its verification deadline to have expired. */
+    @Synchronized fun canResolveUnconfirmed():Boolean = !closed && !storageFailed && foreground && permit==null &&
+        !summary.recordVerified && (canResolveFinishUnknown() || (summary.recordBound &&
+        summary.phase in setOf(RunTaskPhase.AWAITING_VERDICT,RunTaskPhase.WRITE_UNCERTAIN,RunTaskPhase.INTERRUPTED)))
+    @Synchronized fun discardUnconfirmed() {
+        check(canResolveUnconfirmed())
+        journal.clear();closed=true
+    }
     @Synchronized fun discardFinishUnknown() {
         check(canResolveFinishUnknown())
         journal.clear();closed=true
     }
     /** Keeps an encrypted copy carrying the user's own observation; never a platform verdict. */
     @Synchronized fun archiveUserReportedValid() {
-        check(canResolveFinishUnknown())
+        check(canResolveUnconfirmed())
         val minimal = JsonObject(checkpoint.filterKeys { it in setOf("schema", "task", "phase", "execution_mode", "account", "school", "term", "zone", "points", "start", "record", "finish_stage", "server_status", "server_points", "failure_reason", "identity_checks", "last_verdict", "verdict_source") }
             + mapOf("phase" to JsonPrimitive(RunTaskPhase.VALID.name),
                 "verdict_source" to JsonPrimitive("USER_REPORTED"),

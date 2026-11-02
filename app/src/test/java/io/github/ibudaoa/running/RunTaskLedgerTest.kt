@@ -183,6 +183,42 @@ class RunTaskLedgerTest {
         assertFalse(uncertain.canDiscardUnverifiable())
         assertTrue(runCatching { uncertain.discardUnverifiable() }.isFailure)
     }
+    @Test fun `bound pending record can be manually archived with user provenance only`() {
+        val journal=Journal();val task=running(journal)
+        task.accept(task.begin(RunWrite.FINISH),finish)
+        assertTrue(task.canResolveUnconfirmed())
+        task.archiveUserReportedValid()
+        assertNull(journal.bytes)
+        val archived=journal.archived!!.toString(Charsets.UTF_8)
+        assertTrue(archived.contains("USER_REPORTED"));assertTrue(archived.contains("\"record\":45"))
+        assertFalse(archived.contains("proof"))
+    }
+    @Test fun `manual discard never overrides a definite platform verdict`() {
+        for(valid in listOf(true,false)) {
+            val journal=Journal();val task=running(journal)
+            task.accept(task.begin(RunWrite.FINISH),finish)
+            val body=if(valid)detail else detail.toString(Charsets.UTF_8).replace("record_status\":1", "record_status\":2").toByteArray()
+            task.verifyRecord(body)
+            assertFalse(task.canResolveUnconfirmed())
+            assertTrue(runCatching { task.discardUnconfirmed() }.isFailure)
+            assertTrue(runCatching { task.archiveUserReportedValid() }.isFailure)
+            assertNotNull(journal.bytes)
+        }
+    }
+    @Test fun `manual handling rejects an in flight finish but allows its uncertain result`() {
+        val journal=Journal();val task=running(journal);val permit=task.begin(RunWrite.FINISH)
+        assertFalse(task.canResolveUnconfirmed())
+        task.uncertain(permit);assertTrue(task.canResolveUnconfirmed())
+        task.discardUnconfirmed();assertNull(journal.bytes)
+    }
+    @Test fun `bound unknown record can be discarded while storage errors remain protected`() {
+        val journal=Journal();val task=running(journal)
+        task.accept(task.begin(RunWrite.FINISH),finish)
+        task.discardUnconfirmed();assertNull(journal.bytes)
+        val broken=Journal();val uncertain=running(broken);broken.fail=true
+        runCatching { uncertain.pause() };broken.fail=false
+        assertFalse(uncertain.canResolveUnconfirmed())
+    }
     @Test fun `restoration for a different account never rebinds or removes the pending task`() {
         val journal=Journal();running(journal);val saved=journal.bytes!!.clone()
         assertTrue(runCatching { RunTaskLedger.restore(journal,456) }.isFailure)

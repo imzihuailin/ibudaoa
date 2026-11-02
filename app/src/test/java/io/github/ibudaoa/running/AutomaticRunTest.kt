@@ -76,6 +76,7 @@ class AutomaticRunTest {
             assertTrue(controller.start())
             for(i in 1..100) {
                 clock+=500;controller.tick()
+                if(controller.summary.phase==AutomaticRunPhase.AWAITING_VERDICT)controller.query()
                 if(controller.summary.phase==AutomaticRunPhase.VALID)break
             }
         }
@@ -412,6 +413,9 @@ class AutomaticRunTest {
         assertTrue(h.controller.start());h.clock+=40_000;h.controller.pause()
         assertEquals(AutomaticFinishReview.Allowed,h.controller.reviewFinish())
         assertTrue(h.controller.finish())
+        assertEquals(AutomaticRunPhase.AWAITING_VERDICT,h.controller.summary.phase)
+        assertFalse(h.requests.contains(RunEndpoint.RECORD))
+        assertTrue(h.controller.query())
         assertEquals(AutomaticRunPhase.VALID,h.controller.summary.phase)
         assertEquals(1,h.requests.count { it==RunEndpoint.FINISH })
         assertEquals(1,h.requests.count { it==RunEndpoint.GYROSCOPE })
