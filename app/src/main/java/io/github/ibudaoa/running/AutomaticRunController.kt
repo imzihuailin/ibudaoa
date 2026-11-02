@@ -34,6 +34,7 @@ internal class AutomaticRunController(val ledger:RunTaskLedger,val timeline:Auto
             finishing -> AutomaticRunPhase.FINISHING
             task.phase==RunTaskPhase.AWAITING_VERDICT -> AutomaticRunPhase.AWAITING_VERDICT
             starting -> AutomaticRunPhase.STARTING
+            timeline.phase == AutomaticRunPhase.IDLE -> if(problem == null) AutomaticRunPhase.STARTING else AutomaticRunPhase.FAILED
             else -> timeline.phase
         }
         return AutomaticRunSummary(phase,timeline.current()?.meters ?: 0.0,timeline.totalMeters,timeline.elapsedMillis/1000,
@@ -54,7 +55,11 @@ internal class AutomaticRunController(val ledger:RunTaskLedger,val timeline:Auto
     }
     suspend fun start():Boolean {
         if(!operations.tryLock())return false
-        return try { startLocked() } finally { operations.unlock() }
+        return try {
+            startLocked().also { success ->
+                if(!success && timeline.phase == AutomaticRunPhase.IDLE && problem == null) problem="START_REJECTED"
+            }
+        } finally { operations.unlock() }
     }
     private suspend fun startLocked():Boolean {
         if(!foreground || starting || ledger.summary.phase!=RunTaskPhase.PREPARED || !bound() || !preparationCurrent())return false

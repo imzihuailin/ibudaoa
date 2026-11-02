@@ -8,6 +8,7 @@ import io.github.ibudaoa.AppViewModel
 
 /** One application-owned coordinator shared by activities and the foreground service. */
 object RunRuntime : ViewModelStoreOwner {
+    val visible = kotlinx.coroutines.flow.MutableStateFlow(false)
     override val viewModelStore = ViewModelStore()
     @Synchronized fun model(application: Application): AppViewModel =
         ViewModelProvider(this, ViewModelProvider.AndroidViewModelFactory.getInstance(application))[AppViewModel::class.java]

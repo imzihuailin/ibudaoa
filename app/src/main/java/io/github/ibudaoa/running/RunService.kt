@@ -7,10 +7,12 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import io.github.ibudaoa.MainActivity
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.combine
 
 class RunService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var ending=false
+    private var promoted=false
     private var lastUpdate=0L
     private var lastPhase:AutomaticRunPhase?=null
     private var wake: PowerManager.WakeLock? = null
@@ -19,9 +21,10 @@ class RunService : Service() {
         super.onCreate()
         channels(this)
         startForeground(ID, notification(AutomaticRunSummary(AutomaticRunPhase.STARTING)))
+        promoted=true
         wake = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ibudaoa:run").apply { acquire(3 * 60 * 60 * 1000L) }
         scope.launch {
-            RunRuntime.model(application).state.collect { state ->
+            combine(RunRuntime.model(application).state, RunRuntime.visible) { state, visible -> state to visible }.collect { (state, visible) ->
                 if(ending)return@collect
                 val s = state.automaticRun
                 if(s.phase == AutomaticRunPhase.PAUSED || s.phase == AutomaticRunPhase.IDLE) {
@@ -39,9 +42,18 @@ class RunService : Service() {
                         NotificationCompat.Builder(this@RunService, RESULT_CHANNEL).setSmallIcon(android.R.drawable.ic_menu_compass)
                             .setContentTitle(text.first).setContentText(text.second).setContentIntent(open()).setAutoCancel(true).build())
                     stopSelf()
-                } else if(lastPhase!=s.phase || SystemClock.elapsedRealtime()-lastUpdate>=1000) {
+                } else if(visible) {
+                    if(promoted) { stopForeground(STOP_FOREGROUND_REMOVE);promoted=false }
+                } else if(!promoted || lastPhase!=s.phase || SystemClock.elapsedRealtime()-lastUpdate>=1000) {
                     lastPhase=s.phase;lastUpdate=SystemClock.elapsedRealtime()
-                    getSystemService(NotificationManager::class.java).notify(ID, notification(s))
+                    try {
+                        if(!promoted) { startForeground(ID,notification(s));promoted=true }
+                        else getSystemService(NotificationManager::class.java).notify(ID, notification(s))
+                    } catch (_: Exception) {
+                        ending=true
+                        RunRuntime.model(application).pauseFromOutside()
+                        stopForeground(STOP_FOREGROUND_REMOVE);stopSelf()
+                    }
                 }
             }
         }
@@ -66,6 +78,7 @@ class RunService : Service() {
         }
         val delete = PendingIntent.getBroadcast(this, 11, Intent(this, RunNotificationDeleted::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         return NotificationCompat.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.ic_menu_compass)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setContentText(text).setProgress(1000,(s.progressFraction*1000).toInt(),s.phase != AutomaticRunPhase.RUNNING)
             .setContentIntent(open()).setDeleteIntent(delete).setOnlyAlertOnce(true).setSilent(true).setOngoing(false).build()
     }

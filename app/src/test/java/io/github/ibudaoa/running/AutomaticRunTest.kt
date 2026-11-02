@@ -16,6 +16,22 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AutomaticRunTest {
+    @Test fun preparedControllerDoesNotPublishIdleAndStopService() = runBlocking {
+        val h=Harness()
+        assertEquals(AutomaticRunPhase.STARTING,h.controller.summary.phase)
+        assertTrue(h.controller.start())
+        assertEquals(AutomaticRunPhase.RUNNING,h.controller.summary.phase)
+        h.controller.pause()
+        assertEquals(AutomaticRunPhase.PAUSED,h.controller.summary.phase)
+        assertTrue(h.controller.resume())
+        assertEquals(AutomaticRunPhase.RUNNING,h.controller.summary.phase)
+    }
+
+    @Test fun rejectedStartDoesNotRemainStarting() = runBlocking {
+        val h=Harness();h.prepared=false
+        assertFalse(h.controller.start())
+        assertEquals(AutomaticRunPhase.FAILED,h.controller.summary.phase)
+    }
     private val metric=object:PlatformDistance {
         override val implementationId="automatic-flat-test"
         override fun meters(from:CampusCoordinate,to:CampusCoordinate)=kotlin.math.hypot(to.latitude-from.latitude,to.longitude-from.longitude)*100_000

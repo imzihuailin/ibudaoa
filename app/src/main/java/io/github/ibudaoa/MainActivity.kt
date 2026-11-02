@@ -217,6 +217,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        io.github.ibudaoa.running.RunRuntime.visible.value = true
         if (checkLocationOnNextStart) {
             checkLocationOnNextStart = false
             model.onLocationStartup()
@@ -295,7 +296,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         if (!isChangingConfigurations && !locationRequestInFlight) checkLocationOnNextStart = true
-        if (!isChangingConfigurations) model.onForegroundLost()
+        if (!isChangingConfigurations) {
+            io.github.ibudaoa.running.RunRuntime.visible.value = false
+            model.onForegroundLost()
+        }
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         super.onStop()
     }
