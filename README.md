@@ -19,14 +19,14 @@ Kotlin + Jetpack Compose 编写的 Android 校园跑应用，包含账号连接�
 定位用于确定起点及地图展示。临时 VPN 用于用户主动发起的账号连接，需要 Android 系统授权。
 协议所需的最小认证材料通过 Android Keystore 加密保存在应用私有存储；应用禁用系统备份。
 账号和运动请求发送至对应平台，地图、定位及路径规划调用高德 SDK；不应将认证材料、个人诊断或签名私钥提交到仓库。
-高德 SDK 的数据处理见[高德隐私政策](https://lbs.amap.com/pages/privacy/)。公开发行前需核对地图服务授权及应用隐私披露要求。
+高德 SDK 的数据处理见[高德隐私政策](https://lbs.amap.com/pages/privacy/)。使用地图服务时请遵守高德的授权及隐私要求。
 
 ## 源码构建
 
 需要 JDK 17、Android SDK 36、Build Tools 35.0.0；使用仓库中的 Gradle Wrapper。
 在不入库的 `local.properties` 中配置 `sdk.dir`、`amap.android.key` 和 `project.repository.url`。
 地图 Key 应绑定构建使用的包名及签名。源码构建者应使用自己的 Key 和签名，并遵守高德的服务条款。
-当前构建脚本读取 `.local/signing/debug.keystore`，该名称为历史遗留；需自行准备兼容脚本签名配置的本地密钥。发行维护者必须安全保管原有密钥。
+当前构建脚本读取 `.local/signing/debug.keystore`，该名称为历史遗留；需自行准备兼容脚本签名配置的本地密钥。请安全保管自己的签名密钥。
 
 ```sh
 ./gradlew :app:testReleaseUnitTest :app:assembleRelease :app:lintRelease
