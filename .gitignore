@@ -12,6 +12,8 @@
 !/gradle.properties
 !/gradlew
 !/gradlew.bat
+!/scripts/
+!/tests/
 
 # Allow only app sources/resources and required module configuration.
 /app/*
