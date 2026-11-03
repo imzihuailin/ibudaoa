@@ -216,7 +216,16 @@ public class OneClick {
         // Do not inherit user hooks that redirect caches or inject arguments/credentials into Gradle.
         for (String key : List.of("GRADLE_OPTS", "JAVA_OPTS", "JDK_JAVA_OPTIONS", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS")) env.remove(key);
         env.put("JAVA_HOME", javaHome.toString());
-        env.put("PATH", javaHome.resolve("bin") + File.pathSeparator + env.getOrDefault("PATH", ""));
+        String path = javaHome.resolve("bin") + File.pathSeparator + env.getOrDefault("PATH", "");
+        if (WINDOWS) {
+            String systemRoot = env.get("SystemRoot");
+            if (systemRoot == null || systemRoot.isBlank()) throw new IOException("Windows 系统目录不可用，无法运行 SDK 工具");
+            Path system32 = Path.of(systemRoot, "System32");
+            if (!Files.isRegularFile(system32.resolve("findstr.exe")))
+                throw new IOException("Windows 系统工具 findstr.exe 不存在，请修复系统后重试");
+            path = javaHome.resolve("bin") + File.pathSeparator + system32 + File.pathSeparator + env.getOrDefault("PATH", "");
+        }
+        env.put("PATH", path);
         env.put("GRADLE_USER_HOME", cache.resolve("gradle").toString());
         env.put("ANDROID_USER_HOME", cache.resolve("android-user").toString());
         env.put("ANDROID_EMULATOR_HOME", cache.resolve("android-user/emulator").toString());
