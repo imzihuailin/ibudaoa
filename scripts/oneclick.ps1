@@ -4,10 +4,14 @@ $ErrorActionPreference = 'Stop'
 $owner = 'ibudaoa-oneclick-v1'
 $cache = Join-Path $env:LOCALAPPDATA 'ibudaoa'
 $lockPath = Join-Path $env:LOCALAPPDATA '.ibudaoa-oneclick.lock'
+$mutex = $null
 $scratch = $null
 $locked = $false
 $stage = '准备入口'
 $exitCode = 0
+$previousConsoleOutput = [Console]::OutputEncoding
+$previousConsoleInput = [Console]::InputEncoding
+$previousOutputEncoding = $OutputEncoding
 
 function Assert-NoLink([string]$Path) {
     $cursor = [IO.Path]::GetFullPath($Path)
@@ -59,20 +63,64 @@ function Test-Jdk([string]$Java) {
     # Windows PowerShell 5.1 treats native stderr specially. Merge it for java -version.
     $oldPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    try { $version = (& $Java -version 2>&1 | Out-String) }
+    try {
+        $version = (& $Java -version 2>&1 | Out-String)
+        $javaResult = $LASTEXITCODE
+        $compilerVersion = (& $javac -version 2>&1 | Out-String)
+        $compilerResult = $LASTEXITCODE
+    }
     finally { $ErrorActionPreference = $oldPreference }
-    return ($version -match 'version "17\.')
+    return ($javaResult -eq 0 -and $compilerResult -eq 0 -and $version -match 'version "17\.' -and $compilerVersion -match 'javac 17\.')
+}
+function Assert-NoOtherWorker {
+    # Also detect a JVM still finishing after its PowerShell parent was forcibly closed.
+    $processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
+    $ancestors = @{}
+    $cursor = $PID
+    while ($cursor -and !$ancestors.ContainsKey($cursor)) {
+        $ancestors[$cursor] = $true
+        $parent = $processes | Where-Object { $_.ProcessId -eq $cursor } | Select-Object -First 1
+        if (!$parent) { break }
+        $cursor = [int]$parent.ParentProcessId
+    }
+    $cachePattern = [regex]::Escape($cache)
+    foreach ($process in $processes) {
+        if ($ancestors.ContainsKey([int]$process.ProcessId)) { continue }
+        $command = [string]$process.CommandLine
+        if ($process.Name -match '^(powershell|pwsh|java|javaw|cmd)\.exe$' -and
+            ($command -match $cachePattern -or $command -match '(?i)(?:ibudaoa-[a-f0-9-]+|oneclick)\.ps1(?:["\s]|$)')) {
+            throw '另一个构建任务仍在运行，请等待它结束或关闭原构建窗口后重试。'
+        }
+    }
+}
+function Remove-LegacyLock {
+    if (!(Test-Path -LiteralPath $lockPath)) { return }
+    Assert-NoLink $lockPath
+    # The historical lock was empty. Never recursively remove unexpected user content.
+    [IO.Directory]::Delete($lockPath)
+    Write-Host '✓ 已恢复上次中断的构建，可以直接重试。'
 }
 
 try {
+    # Console.Error used an ASCII encoder on some Windows hosts. Set both native and PS encodings.
+    $utf8 = New-Object Text.UTF8Encoding($false)
+    [Console]::OutputEncoding = $utf8
+    [Console]::InputEncoding = $utf8
+    $OutputEncoding = $utf8
     if ($env:OS -ne 'Windows_NT' -or [Environment]::Is64BitOperatingSystem -eq $false -or
         $env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw '此入口支持 Windows x64，请在 64 位 PowerShell 中运行。' }
-    Assert-NoLink $lockPath
-    # New-Item without -Force fails atomically if another operation already owns the lock.
-    New-Item -ItemType Directory -Path $lockPath -ErrorAction Stop | Out-Null
-    $locked = $true
-    $scratch = Join-Path ([IO.Path]::GetTempPath()) ('ibudaoa-' + [Guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $scratch | Out-Null
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        $pathBytes = [Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($cache).ToUpperInvariant())
+        $identity = ([BitConverter]::ToString($hasher.ComputeHash($pathBytes))).Replace('-', '')
+    } finally { $hasher.Dispose() }
+    # Kernel mutexes disappear when their owner exits, even when finally never runs.
+    $mutex = New-Object Threading.Mutex($false, "Global\ibudaoa-oneclick-$identity")
+    try { $locked = $mutex.WaitOne(0) }
+    catch [Threading.AbandonedMutexException] { $locked = $true }
+    if (!$locked) { throw '另一个构建或清理正在运行，请等待结束后重试。' }
+    Assert-NoOtherWorker
+    Remove-LegacyLock
     if ($Mode -eq 'uninstall' -and !(Test-Path -LiteralPath $cache)) {
         Write-Host '没有需要清理的构建文件。'
         return
@@ -83,6 +131,11 @@ try {
         New-Item -ItemType Directory -Path $cache | Out-Null
         [IO.File]::WriteAllText((Join-Path $cache '.owner'), $owner)
     }
+    # Keep partial downloads/extraction inside the owned cache and overwrite them on retry.
+    $scratch = Join-Path $cache 'bootstrap'
+    Assert-NoLink $scratch
+    if (Test-Path -LiteralPath $scratch) { Remove-OwnedTree $scratch }
+    New-Item -ItemType Directory -Path $scratch | Out-Null
     Write-Host 'ibudaoa 一键工具'
     $stage = '查询最新版本'
     $engine = Join-Path $cache 'OneClick.java'
@@ -129,7 +182,12 @@ try {
         Copy-Item -LiteralPath $engine -Destination $localEngine
     } else {
         Get-Download "https://raw.githubusercontent.com/imzihuailin/ibudaoa/$revision/scripts/OneClick.java" $localEngine
-        Copy-Item -LiteralPath $localEngine -Destination $engine -Force
+        $stagedEngine = Join-Path $cache 'OneClick.java.new'
+        Assert-NoLink $stagedEngine
+        Assert-NoLink $engine
+        Copy-Item -LiteralPath $localEngine -Destination $stagedEngine -Force
+        if (Test-Path -LiteralPath $engine) { [IO.File]::Replace($stagedEngine, $engine, [NullString]::Value) }
+        else { [IO.File]::Move($stagedEngine, $engine) }
     }
     $stage = $Mode
     & $java '-Dfile.encoding=UTF-8' $localEngine $Mode $revision $cache
@@ -145,11 +203,18 @@ try {
         Write-Host '清理完成。'
     } elseif ($result -ne 0) { throw "操作未完成，返回码：$result" }
 } catch {
-    [Console]::Error.WriteLine("失败阶段：$stage。$($_.Exception.Message)")
-    [Console]::Error.WriteLine("请处理错误后重新执行同一命令；若上次被强制终止，请确认没有任务运行，再删除锁目录：$lockPath")
+    Write-Host "失败阶段：$stage。$($_.Exception.Message)" -ForegroundColor Red
+    Write-Host '请处理上述问题后重新执行同一命令；中断后无需手动删除锁文件。' -ForegroundColor Red
     $exitCode = 1
 } finally {
-    if ($scratch -and (Test-Path -LiteralPath $scratch)) { Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction Continue }
-    if ($locked) { Remove-Item -LiteralPath $lockPath -Force -ErrorAction Continue }
+    try {
+        if ($scratch -and (Test-Path -LiteralPath $scratch)) { Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction Continue }
+    } finally {
+        if ($locked) { $mutex.ReleaseMutex() }
+        if ($mutex) { $mutex.Dispose() }
+        [Console]::OutputEncoding = $previousConsoleOutput
+        [Console]::InputEncoding = $previousConsoleInput
+        $OutputEncoding = $previousOutputEncoding
+    }
 }
 exit $exitCode

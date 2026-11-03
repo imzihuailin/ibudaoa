@@ -93,6 +93,14 @@ public class OneClickTest {
             check(Files.readString(signing.config.resolve("signing.sha1")).equals(firstSignature), "reuse signature");
             Files.delete(signing.config.resolve("signing.keystore"));
             rejects(signing::prepareSigning, "never replace missing signature");
+            Path sdk = root.resolve("partial-sdk");
+            Files.createDirectories(sdk.resolve("platforms/android-36"));
+            Files.writeString(sdk.resolve("platforms/android-36/android.jar"), "interrupted download");
+            check(!foreign.platformComplete(sdk), "incomplete platform must be repaired");
+            Path tools = sdk.resolve("build-tools/35.0.0"); Files.createDirectories(tools);
+            Files.writeString(tools.resolve("apksigner" + (OneClick.WINDOWS ? ".bat" : "")), "partial extraction");
+            check(!foreign.buildToolsComplete(sdk), "launcher alone is not an installed toolchain");
+            check(!foreign.sdkComplete(sdk), "partial SDK must never be reused");
             System.out.println("PASS " + checks + " checks");
         } finally { OneClick.deleteTree(root); }
     }

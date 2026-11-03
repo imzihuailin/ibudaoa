@@ -236,7 +236,8 @@ public class OneClick {
         Path sdk = cache.resolve("tools/android-sdk");
         if (sdkComplete(sdk)) { System.out.println("✓ Android SDK"); return sdk; }
         Path manager = sdk.resolve("cmdline-tools/19.0/bin/sdkmanager" + (WINDOWS ? ".bat" : ""));
-        if (!Files.isRegularFile(manager)) {
+        Path toolsReady = manager.getParent().getParent().resolve(".oneclick-complete");
+        if (!Files.isRegularFile(manager) || !Files.isRegularFile(toolsReady)) {
             Path metadata = cache.resolve("sdk-repository.xml");
             download("https://dl.google.com/android/repository/repository2-1.xml", metadata);
             DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
@@ -267,8 +268,12 @@ public class OneClick {
             Path target = sdk.resolve("cmdline-tools/19.0");
             deleteTree(target); Files.createDirectories(target.getParent());
             Files.move(unpack.resolve("cmdline-tools"), target);
+            atomicWrite(toolsReady, "19.0".getBytes(StandardCharsets.UTF_8));
             deleteTree(unpack); Files.delete(zip);
         }
+        // sdkmanager can leave package directories after interruption. Only repair our own SDK.
+        if (!platformComplete(sdk)) deleteTree(sdk.resolve("platforms/android-36"));
+        if (!buildToolsComplete(sdk)) deleteTree(sdk.resolve("build-tools/35.0.0"));
         Map<String, String> env = Map.of("ANDROID_HOME", sdk.toString(), "ANDROID_SDK_ROOT", sdk.toString());
         System.out.println("请阅读接下来显示的 Android SDK 许可。\n输入 y 表示同意，输入 N 表示拒绝。");
         mustRun(cache, env, batch(manager, "--sdk_root=" + sdk, "--licenses"));
@@ -284,9 +289,25 @@ public class OneClick {
     }
 
     boolean sdkComplete(Path sdk) {
-        return Files.isRegularFile(sdk.resolve("platforms/android-36/android.jar"))
-                && Files.isRegularFile(sdk.resolve("build-tools/35.0.0/apksigner" + (WINDOWS ? ".bat" : "")))
+        return platformComplete(sdk) && buildToolsComplete(sdk)
                 && Files.isDirectory(sdk.resolve("licenses"));
+    }
+
+    boolean platformComplete(Path sdk) {
+        Path platform = sdk.resolve("platforms/android-36");
+        return Files.isRegularFile(platform.resolve("package.xml")) && validJar(platform.resolve("android.jar"));
+    }
+
+    boolean buildToolsComplete(Path sdk) {
+        Path tools = sdk.resolve("build-tools/35.0.0");
+        return Files.isRegularFile(tools.resolve("package.xml"))
+                && Files.isRegularFile(tools.resolve("apksigner" + (WINDOWS ? ".bat" : "")))
+                && Files.isRegularFile(tools.resolve(executable("aapt"))) && validJar(tools.resolve("lib/apksigner.jar"));
+    }
+
+    static boolean validJar(Path jar) {
+        try (ZipFile zip = new ZipFile(jar.toFile())) { return zip.size() > 0; }
+        catch (IOException e) { return false; }
     }
 
     static String digest(Path file, String algorithm) throws Exception {
