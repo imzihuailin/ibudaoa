@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# Bash 3.2+ (including the macOS system Bash). No Git, Python or jq required.
+# Linux Bash entrypoint. No Git, Python or jq required.
 set -euo pipefail
 umask 077
 mode=${1:-build}
 case "$mode" in build|uninstall) ;; *) echo '用法：oneclick.sh [build|uninstall]' >&2; exit 1;; esac
 case "$(uname -s):$(uname -m)" in
   Linux:x86_64) platform=linux; arch=x64;;
-  Darwin:x86_64) platform=mac; arch=x64;;
-  Darwin:arm64) platform=mac; arch=aarch64;;
   *) echo '暂不支持此系统或架构。' >&2; exit 1;;
 esac
 for tool in curl tar; do
@@ -39,14 +37,39 @@ else
   mkdir "$cache"
   printf '%s' "$owner" > "$cache/.owner"
 fi
-fetch() { curl --fail --location --retry 2 --connect-timeout 20 --max-time 900 --proto '=https' --tlsv1.2 "$1" -o "$2"; }
+sha256() {
+  local result
+  if command -v sha256sum >/dev/null; then result=$(sha256sum "$1"); else result=$(shasum -a 256 "$1"); fi
+  printf '%s' "${result%% *}"
+}
+fetch() {
+  local url=$1 destination=$2 expected=${3:-} attempt
+  [[ "$url" == https://* ]] || return 1
+  for attempt in 1 2; do
+    echo "下载文件：${destination##*/}；来源：${url#https://}（尝试 $attempt/2）"
+    if curl --fail --location --connect-timeout 15 --speed-limit 1 --speed-time 30 --max-time 1800 \
+        --proto '=https' --proto-redir '=https' --tlsv1.2 "$url" -o "$destination.part"; then
+      if [ -z "$expected" ] || [ "$(sha256 "$destination.part")" = "$expected" ]; then
+        mv -f "$destination.part" "$destination"
+        return 0
+      fi
+      echo '文件校验失败，丢弃本次下载。' >&2
+    fi
+    rm -f "$destination.part"
+    echo '下载失败或长时间无进展，正在重试或切换来源。' >&2
+  done
+  return 1
+}
+get_revision() {
+  fetch 'https://api.github.com/repos/imzihuailin/ibudaoa/commits?per_page=1' "$scratch/commit.json"
+  revision=$(sed -n 's/^[[:space:]]*"sha"[[:space:]]*:[[:space:]]*"\([a-f0-9]*\)".*/\1/p' "$scratch/commit.json" | head -1)
+  [[ "$revision" =~ ^[a-f0-9]{40}$ ]] || { echo '无法确定最新源码版本。' >&2; exit 1; }
+}
 echo 'ibudaoa 一键工具'
 stage='查询最新版本'
 revision=0000000000000000000000000000000000000000
 if [ "$mode" = build ] || [ ! -f "$cache/OneClick.java" ]; then
-  fetch 'https://api.github.com/repos/imzihuailin/ibudaoa/commits?per_page=1' "$scratch/commit.json"
-  revision=$(sed -n 's/^[[:space:]]*"sha"[[:space:]]*:[[:space:]]*"\([a-f0-9]*\)".*/\1/p' "$scratch/commit.json" | head -1)
-  [[ "$revision" =~ ^[a-f0-9]{40}$ ]] || { echo '无法确定最新源码版本。' >&2; exit 1; }
+  get_revision
 fi
 stage='准备 Java 17'
 jdk="$cache/tools/jdk"
@@ -57,19 +80,21 @@ if [ -n "$java_bin" ] && ! "$java_bin" -version 2>&1 | head -1 | grep -Eq 'versi
 if [ -z "$java_bin" ]; then
   if [ ! -x "$jdk/bin/java" ]; then
     echo '正在下载 Java 17……'
-    fetch "https://api.adoptium.net/v3/assets/latest/17/hotspot?architecture=$arch&image_type=jdk&os=$platform&vendor=eclipse" "$scratch/jdk.json"
-    checksum=$(sed -n 's/^[[:space:]]*"checksum"[[:space:]]*:[[:space:]]*"\([a-f0-9]*\)".*/\1/p' "$scratch/jdk.json")
-    url=$(sed -n 's/^[[:space:]]*"link"[[:space:]]*:[[:space:]]*"\(https:[^"]*\)".*/\1/p' "$scratch/jdk.json")
-    [[ "$checksum" =~ ^[a-f0-9]{64}$ ]] && [[ "$url" == https://github.com/adoptium/* ]] || { echo 'Java 下载元数据异常。' >&2; exit 1; }
-    fetch "$url" "$scratch/jdk.tar.gz"
-    if command -v sha256sum >/dev/null; then actual=$(sha256sum "$scratch/jdk.tar.gz")
-    else actual=$(shasum -a 256 "$scratch/jdk.tar.gz"); fi
-    actual=${actual%% *}
-    [ "$actual" = "$checksum" ] || { echo 'Java 下载校验失败。' >&2; exit 1; }
+    [ "$revision" != 0000000000000000000000000000000000000000 ] || get_revision
+    fetch "https://raw.githubusercontent.com/imzihuailin/ibudaoa/$revision/scripts/download-manifest.properties" "$scratch/downloads.properties"
+    property() { awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); sub(/\r$/, ""); print; exit}' "$scratch/downloads.properties"; }
+    checksum=$(property "jdk.$platform.$arch.sha256")
+    mirror=$(property "jdk.$platform.$arch.mirror")
+    official=$(property "jdk.$platform.$arch.official")
+    [[ "$checksum" =~ ^[a-f0-9]{64}$ ]] && [ -n "$mirror" ] && [ -n "$official" ] || { echo 'Java 下载清单异常。' >&2; exit 1; }
+    downloaded=false
+    for url in "$mirror" "$official"; do
+      if fetch "$url" "$scratch/jdk.tar.gz" "$checksum"; then downloaded=true; break; fi
+    done
+    [ "$downloaded" = true ] || { echo 'Java 所有下载来源均失败。' >&2; exit 1; }
     mkdir "$scratch/jdk"
     tar -xzf "$scratch/jdk.tar.gz" -C "$scratch/jdk" --strip-components=1
     prepared="$scratch/jdk"
-    [ "$platform" != mac ] || prepared="$scratch/jdk/Contents/Home"
     [ -x "$prepared/bin/java" ] && [ -x "$prepared/bin/javac" ]
     mkdir -p "$cache/tools"
     rm -rf "$jdk"

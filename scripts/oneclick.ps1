@@ -45,16 +45,82 @@ function Remove-OwnedTree([string]$Path) {
         [IO.Directory]::Delete($item.FullName)
     } else { Remove-Item -LiteralPath $Path -Force }
 }
-function Get-Download([string]$Url, [string]$Destination) {
-    if (!$Url.StartsWith('https://')) { throw '下载地址必须使用 HTTPS。' }
+function Get-Download([string[]]$Urls, [string]$Destination, [string]$Sha256 = '', [int]$ConnectTimeoutMs = 15000, [int]$ReadTimeoutMs = 30000) {
+    if ($Sha256 -and $Sha256 -notmatch '^[a-fA-F0-9]{64}$') { throw '下载清单校验值无效。' }
+    $partial = $Destination + '.part'
     $lastFailure = $null
-    for ($attempt = 1; $attempt -le 3; $attempt++) {
-        try {
-            Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -TimeoutSec 900 -Headers @{'User-Agent'='ibudaoa-oneclick'}
-            return
-        } catch { $lastFailure = $_ }
+    Write-Host "下载文件：$([IO.Path]::GetFileName($Destination))"
+    foreach ($url in $Urls) {
+        for ($attempt = 1; $attempt -le 2; $attempt++) {
+            $response = $null; $stream = $null; $file = $null
+            try {
+                $uri = [Uri]$url
+                if ($uri.Scheme -ne 'https') { throw '下载地址必须使用 HTTPS。' }
+                Write-Host "下载来源：$($uri.Host)（尝试 $attempt/2）"
+                try {
+                    for ($redirect = 0; $redirect -le 5; $redirect++) {
+                        if ($uri.Scheme -ne 'https') { throw '拒绝跳转至非 HTTPS 地址。' }
+                        $request = [Net.HttpWebRequest]::Create($uri)
+                        $request.Timeout = $ConnectTimeoutMs
+                        $request.ReadWriteTimeout = $ReadTimeoutMs
+                        $request.AllowAutoRedirect = $false
+                        $request.UserAgent = 'ibudaoa-oneclick'
+                        $response = $request.GetResponse()
+                        $status = [int]$response.StatusCode
+                        if ($status -ge 300 -and $status -lt 400) {
+                            $next = New-Object Uri($uri, $response.Headers['Location'])
+                            $response.Close(); $response = $null
+                            $uri = $next
+                            continue
+                        }
+                        if ($status -ne 200) { throw "下载失败，HTTP $status" }
+                        break
+                    }
+                    if (!$response) { throw '下载跳转次数过多。' }
+                    $total = $response.ContentLength
+                    $stream = $response.GetResponseStream()
+                    if ($stream.CanTimeout) { $stream.ReadTimeout = $ReadTimeoutMs }
+                    $file = [IO.File]::Open($partial, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                    $buffer = New-Object byte[] 65536
+                    $clock = [Diagnostics.Stopwatch]::StartNew()
+                    [long]$count = 0; [long]$lastTime = 0; [long]$lastBytes = 0
+                    while (($n = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                        $file.Write($buffer, 0, $n); $count += $n
+                        $now = $clock.ElapsedMilliseconds
+                        if ($now - $lastTime -ge 1000) {
+                            $speed = ($count - $lastBytes) * 1000.0 / ($now - $lastTime) / 1024
+                            $percent = if ($total -gt 0) { '{0:F0}%' -f ($count * 100.0 / $total) } else { '大小未知' }
+                            Write-Host -NoNewline ("`r下载中…… {0:F1} MB  {1}  {2:F0} KB/s    " -f ($count / 1MB), $percent, $speed)
+                            $lastTime = $now; $lastBytes = $count
+                        }
+                    }
+                } finally {
+                    if ($file) { $file.Dispose() }
+                    if ($stream) { $stream.Dispose() }
+                    if ($response) { $response.Close() }
+                }
+                if ($total -ge 0 -and $count -ne $total) { throw '下载文件不完整。' }
+                if ($Sha256 -and (Get-FileHash -Algorithm SHA256 -LiteralPath $partial).Hash -ne $Sha256) { throw '文件校验失败。' }
+                if (Test-Path -LiteralPath $Destination) { [IO.File]::Replace($partial, $Destination, [NullString]::Value) }
+                else { [IO.File]::Move($partial, $Destination) }
+                Write-Host "`r✓ 下载完成                                          "
+                return
+            } catch {
+                $lastFailure = $_.Exception.Message
+                if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force }
+                Write-Host "`n下载失败或长时间无进展：$lastFailure。正在重试或切换来源。"
+            }
+        }
     }
-    throw $lastFailure
+    throw "所有下载来源均失败：$lastFailure"
+}
+function Get-LatestRevision {
+    $metadata = Join-Path $scratch 'commit.json'
+    Get-Download 'https://api.github.com/repos/imzihuailin/ibudaoa/commits?per_page=1' $metadata
+    $commit = @([IO.File]::ReadAllText($metadata) | ConvertFrom-Json)
+    $value = $commit[0].sha
+    if ($value -notmatch '^[a-f0-9]{40}$') { throw '无法确定最新源码版本。' }
+    return $value
 }
 function Test-Jdk([string]$Java) {
     if (!$Java -or !(Test-Path -LiteralPath $Java)) { return $false }
@@ -141,9 +207,7 @@ try {
     $engine = Join-Path $cache 'OneClick.java'
     $revision = '0000000000000000000000000000000000000000'
     if ($Mode -eq 'build' -or !(Test-Path -LiteralPath $engine)) {
-        $commit = Invoke-RestMethod -Uri 'https://api.github.com/repos/imzihuailin/ibudaoa/commits?per_page=1' -Headers @{'User-Agent'='ibudaoa-oneclick'}
-        $revision = @($commit)[0].sha
-        if ($revision -notmatch '^[a-f0-9]{40}$') { throw '无法确定最新源码版本。' }
+        $revision = Get-LatestRevision
     }
     $stage = '准备 Java 17'
     $java = $null
@@ -160,13 +224,15 @@ try {
         $java = Join-Path $jdk 'bin\java.exe'
         if (!(Test-Jdk $java)) {
             Write-Host '正在下载 Java 17……'
-            $assets = @(Invoke-RestMethod -Uri 'https://api.adoptium.net/v3/assets/latest/17/hotspot?architecture=x64&image_type=jdk&os=windows&vendor=eclipse')
-            if ($assets.Count -ne 1) { throw 'Java 下载元数据异常。' }
-            $package = $assets[0].binary.package
-            if ($package.checksum -notmatch '^[a-f0-9]{64}$' -or $package.link -notlike 'https://github.com/adoptium/*') { throw 'Java 下载元数据异常。' }
+            if ($revision -eq '0000000000000000000000000000000000000000') { $revision = Get-LatestRevision }
+            $manifest = Join-Path $scratch 'download-manifest.properties'
+            Get-Download "https://raw.githubusercontent.com/imzihuailin/ibudaoa/$revision/scripts/download-manifest.properties" $manifest
+            $downloads = ConvertFrom-StringData ([IO.File]::ReadAllText($manifest))
+            $checksum = $downloads['jdk.windows.x64.sha256']
+            $sources = @($downloads['jdk.windows.x64.mirror'], $downloads['jdk.windows.x64.official'])
+            if ($checksum -notmatch '^[a-f0-9]{64}$' -or !$sources[0] -or !$sources[1]) { throw 'Java 下载清单异常。' }
             $archive = Join-Path $scratch 'jdk.zip'
-            Get-Download $package.link $archive
-            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash -ne $package.checksum) { throw 'Java 下载校验失败。' }
+            Get-Download $sources $archive $checksum
             $unpack = Join-Path $scratch 'jdk'
             Expand-Archive -LiteralPath $archive -DestinationPath $unpack
             $roots = @(Get-ChildItem -Directory -LiteralPath $unpack)

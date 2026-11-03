@@ -1,12 +1,10 @@
 import java.io.*;
 import java.net.*;
-import java.net.http.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.*;
 import java.security.cert.X509Certificate;
-import java.time.Duration;
 import java.util.*;
 import java.util.regex.*;
 import java.util.zip.*;
@@ -33,6 +31,7 @@ public class OneClick {
 
     public static void main(String[] args) {
         try {
+            if (!WINDOWS && !System.getProperty("os.name").equals("Linux")) throw new IOException("仅支持 Windows 和 Linux");
             if (args.length != 3 || !Set.of("build", "uninstall").contains(args[0]) || !args[1].matches("[a-f0-9]{40}"))
                 throw new IOException("入口参数无效");
             Path base = WINDOWS ? Path.of(requireEnv("LOCALAPPDATA"), "ibudaoa")
@@ -123,35 +122,75 @@ public class OneClick {
     }
 
     static void download(String address, Path destination) throws Exception {
-        URI uri = URI.create(address);
-        if (!uri.getScheme().equals("https")) throw new IOException("下载地址必须使用 HTTPS");
-        HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(30))
-                .followRedirects(HttpClient.Redirect.NORMAL).build();
-        Path temp = destination.resolveSibling(destination.getFileName() + ".part");
+        downloadFrom(List.of(address), destination, null);
+    }
+
+    static void downloadFrom(List<String> sources, Path destination, String checksum) throws Exception {
+        if (checksum != null && !checksum.matches("[a-fA-F0-9]{40}|[a-fA-F0-9]{64}"))
+            throw new IOException("下载校验值无效");
+        IOException last = null;
+        Path partial = destination.resolveSibling(destination.getFileName() + ".part");
         Files.createDirectories(destination.getParent());
+        System.out.println("下载文件：" + destination.getFileName());
+        for (String source : sources) {
+            for (int attempt = 1; attempt <= 2; attempt++) {
+                System.out.println("下载来源：" + URI.create(source).getHost() + "（尝试 " + attempt + "/2）");
+                try {
+                    downloadAttempt(source, partial, 15000, 30000);
+                    if (checksum != null && !digest(partial, checksum.length() == 40 ? "SHA-1" : "SHA-256").equalsIgnoreCase(checksum))
+                        throw new IOException("文件校验失败");
+                    try { Files.move(partial, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING); }
+                    catch (AtomicMoveNotSupportedException e) { Files.move(partial, destination, StandardCopyOption.REPLACE_EXISTING); }
+                    System.out.println("\r✓ 下载完成                                          ");
+                    return;
+                } catch (IOException e) {
+                    last = e;
+                    System.out.println("\n下载失败或长时间无进展：" + e.getMessage() + "。正在重试或切换来源。");
+                } finally { Files.deleteIfExists(partial); }
+            }
+        }
+        throw new IOException("所有下载来源均失败：" + (last == null ? "没有下载地址" : last.getMessage()), last);
+    }
+
+    static void downloadAttempt(String address, Path destination, int connectTimeout, int readTimeout) throws IOException {
+        URI uri = URI.create(address);
+        HttpURLConnection connection = null;
         try {
-            HttpRequest request = HttpRequest.newBuilder(uri).timeout(Duration.ofMinutes(15))
-                    .header("User-Agent", "ibudaoa-oneclick").build();
-            HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
-            try (InputStream in = response.body()) {
-                if (response.statusCode() != 200) throw new IOException("下载失败，HTTP " + response.statusCode() + "：" + uri.getHost());
-                long total = response.headers().firstValueAsLong("Content-Length").orElse(-1), count = 0, last = 0;
-                try (OutputStream out = Files.newOutputStream(temp)) {
+            for (int redirect = 0; redirect <= 5; redirect++) {
+                if (!"https".equalsIgnoreCase(uri.getScheme())) throw new IOException("下载地址及跳转必须使用 HTTPS");
+                connection = (HttpURLConnection) uri.toURL().openConnection();
+                connection.setConnectTimeout(connectTimeout);
+                connection.setReadTimeout(readTimeout);
+                connection.setInstanceFollowRedirects(false);
+                connection.setRequestProperty("User-Agent", "ibudaoa-oneclick");
+                int status = connection.getResponseCode();
+                if (status >= 300 && status < 400) {
+                    String next = connection.getHeaderField("Location");
+                    connection.disconnect(); connection = null;
+                    if (next == null) throw new IOException("下载跳转地址缺失");
+                    uri = uri.resolve(next);
+                    continue;
+                }
+                if (status != 200) throw new IOException("下载失败，HTTP " + status);
+                long total = connection.getContentLengthLong(), count = 0, lastTime = System.nanoTime(), lastBytes = 0;
+                try (InputStream in = connection.getInputStream(); OutputStream out = Files.newOutputStream(destination)) {
                     byte[] buffer = new byte[65536];
                     for (int n; (n = in.read(buffer)) != -1;) {
                         out.write(buffer, 0, n); count += n;
                         long now = System.nanoTime();
-                        if (now - last > 1_000_000_000L) {
-                            System.out.print("\r下载中…… " + (total > 0 ? count * 100 / total + "%" : count / 1048576 + " MB"));
-                            last = now;
+                        if (now - lastTime >= 1_000_000_000L) {
+                            double speed = (count - lastBytes) / 1024.0 / ((now - lastTime) / 1_000_000_000.0);
+                            System.out.printf(Locale.ROOT, "\r下载中…… %.1f MB  %s  %.0f KB/s    ", count / 1048576.0,
+                                    total > 0 ? count * 100 / total + "%" : "大小未知", speed);
+                            lastTime = now; lastBytes = count;
                         }
                     }
                 }
                 if (total >= 0 && count != total) throw new IOException("下载文件不完整");
-                System.out.println("\r✓ 下载完成                         ");
+                return;
             }
-            Files.move(temp, destination, StandardCopyOption.REPLACE_EXISTING);
-        } finally { Files.deleteIfExists(temp); }
+            throw new IOException("下载跳转次数过多");
+        } finally { if (connection != null) connection.disconnect(); }
     }
 
     static void extract(Path archive, Path directory) throws IOException {
@@ -167,7 +206,12 @@ public class OneClick {
     }
 
     int process(Path directory, Map<String, String> extra, String... command) throws Exception {
+        return processLogged(directory, extra, null, command);
+    }
+
+    int processLogged(Path directory, Map<String, String> extra, Path log, String... command) throws Exception {
         ProcessBuilder builder = new ProcessBuilder(command).directory(directory.toFile()).inheritIO();
+        if (log != null) builder.redirectOutput(ProcessBuilder.Redirect.PIPE).redirectErrorStream(true);
         Map<String, String> env = builder.environment();
         // Do not inherit user hooks that redirect caches or inject arguments/credentials into Gradle.
         for (String key : List.of("GRADLE_OPTS", "JAVA_OPTS", "JDK_JAVA_OPTIONS", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS")) env.remove(key);
@@ -180,7 +224,18 @@ public class OneClick {
         Process child = builder.start();
         Thread hook = new Thread(() -> { child.descendants().forEach(ProcessHandle::destroy); child.destroy(); });
         Runtime.getRuntime().addShutdownHook(hook);
-        try { return child.waitFor(); } finally { Runtime.getRuntime().removeShutdownHook(hook); }
+        try {
+            if (log != null) {
+                try (InputStream in = child.getInputStream(); OutputStream out = Files.newOutputStream(log)) {
+                    byte[] buffer = new byte[8192];
+                    for (int n; (n = in.read(buffer)) != -1;) { System.out.write(buffer, 0, n); out.write(buffer, 0, n); }
+                }
+            }
+            return child.waitFor();
+        } finally {
+            if (child.isAlive()) { child.descendants().forEach(ProcessHandle::destroy); child.destroy(); }
+            Runtime.getRuntime().removeShutdownHook(hook);
+        }
     }
 
     void mustRun(Path directory, Map<String, String> env, String... command) throws Exception {
@@ -196,7 +251,7 @@ public class OneClick {
             if (script.toString().matches(".*[%!\r\n\"].*")) throw new IOException("Windows 构建路径包含不支持的字符");
             for (String arg : args) if (arg.matches(".*[%!\r\n\"].*")) throw new IOException("Windows 参数含不支持的字符");
             // Let PowerShell quote batch paths/arguments, rather than cmd /c's fragile nested quotes.
-            StringBuilder command = new StringBuilder("$ErrorActionPreference='Stop'; & ")
+            StringBuilder command = new StringBuilder("$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $OutputEncoding=[Console]::OutputEncoding; & ")
                     .append(psLiteral(script.toString()));
             for (String arg : args) command.append(' ').append(psLiteral(arg));
             command.append("; exit $LASTEXITCODE");
@@ -226,6 +281,47 @@ public class OneClick {
         return source;
     }
 
+    void prepareGradle(Path source) throws Exception {
+        Properties manifest = new Properties(), wrapper = new Properties();
+        try (InputStream in = Files.newInputStream(source.resolve("scripts/download-manifest.properties"))) { manifest.load(in); }
+        Path properties = source.resolve("gradle/wrapper/gradle-wrapper.properties");
+        try (InputStream in = Files.newInputStream(properties)) { wrapper.load(in); }
+        String name = manifest.getProperty("gradle.file", ""), checksum = manifest.getProperty("gradle.sha256", "");
+        if (!name.matches("gradle-[0-9.]+-bin\\.zip") || !checksum.matches("[a-f0-9]{64}")
+                || !checksum.equals(wrapper.getProperty("distributionSha256Sum"))
+                || !wrapper.getProperty("distributionUrl", "").endsWith("/" + name))
+            throw new IOException("下载清单与 Gradle Wrapper 版本或校验值不一致");
+        Path zip = cache.resolve("tools/" + name);
+        noLinks(zip);
+        if (!Files.isRegularFile(zip) || !digest(zip, "SHA-256").equals(checksum)) {
+            downloadFrom(List.of(manifest.getProperty("gradle.mirror"), manifest.getProperty("gradle.official")), zip, checksum);
+        } else System.out.println("✓ Gradle 下载缓存校验通过");
+        wrapper.setProperty("distributionUrl", zip.toUri().toASCIIString());
+        ByteArrayOutputStream data = new ByteArrayOutputStream();
+        wrapper.store(data, "Managed one-click build: verified local distribution");
+        atomicWrite(properties, data.toByteArray());
+    }
+
+    static boolean dependencyNetworkFailure(String log) {
+        return Pattern.compile("(?i)could not (?:GET|HEAD|resolve)|could not transfer|(?:connect|read|connection|socket) timed out|remote host terminated the handshake|PKIX path building failed")
+                .matcher(log).find();
+    }
+
+    void buildApk(Path source, Map<String, String> env) throws Exception {
+        Path log = cache.resolve("gradle-build.log");
+        for (boolean mirrors : new boolean[]{true, false}) {
+            System.out.println(mirrors ? "依赖来源：阿里云镜像优先" : "正在使用官方依赖仓库重试……");
+            int code = processLogged(source, env, log, batch(source.resolve(WINDOWS ? "gradlew.bat" : "gradlew"),
+                    "--no-daemon", "--console=plain", "-Pkotlin.compiler.execution.strategy=in-process",
+                    "-Pandroid.builder.sdkDownload=false", "-Pibudaoa.useMirrors=" + mirrors,
+                    "-Dorg.gradle.internal.http.connectionTimeout=15000", "-Dorg.gradle.internal.http.socketTimeout=30000", ":app:assembleRelease"));
+            if (code == 0) return;
+            if (!mirrors || !dependencyNetworkFailure(new String(Files.readAllBytes(log), StandardCharsets.UTF_8)))
+                throw new IOException("编译失败，请查看上方错误");
+            System.out.println("镜像依赖下载失败，保留已有缓存并切换官方源。");
+        }
+    }
+
     Path prepareSdk() throws Exception {
         for (String variable : List.of("ANDROID_HOME", "ANDROID_SDK_ROOT")) {
             String existing = System.getenv(variable);
@@ -245,7 +341,7 @@ public class OneClick {
             factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
             factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
             Document document = factory.newDocumentBuilder().parse(metadata.toFile());
-            String host = WINDOWS ? "windows" : System.getProperty("os.name").startsWith("Mac") ? "macosx" : "linux";
+            String host = WINDOWS ? "windows" : "linux";
             Element selected = null;
             NodeList packages = document.getElementsByTagName("remotePackage");
             for (int i = 0; i < packages.getLength(); i++) {
@@ -262,8 +358,7 @@ public class OneClick {
             if (!url.matches("commandlinetools-[A-Za-z0-9_.-]+\\.zip") || !checksum.matches("[a-fA-F0-9]{40}"))
                 throw new IOException("Android 工具下载元数据异常");
             Path zip = cache.resolve("sdk-tools.zip"), unpack = cache.resolve("sdk-unpack");
-            download("https://dl.google.com/android/repository/" + url, zip);
-            if (!digest(zip, "SHA-1").equalsIgnoreCase(checksum)) throw new IOException("Android 工具下载校验失败");
+            downloadFrom(List.of("https://dl.google.com/android/repository/" + url), zip, checksum);
             deleteTree(unpack); extract(zip, unpack);
             Path target = sdk.resolve("cmdline-tools/19.0");
             deleteTree(target); Files.createDirectories(target.getParent());
@@ -415,7 +510,7 @@ public class OneClick {
 
     void build() throws Exception {
         step(1, "下载最新源码"); Path source = prepareSource();
-        step(2, "准备编译环境"); System.out.println("✓ Java 17"); Path sdk = prepareSdk();
+        step(2, "准备编译环境"); System.out.println("✓ Java 17"); prepareGradle(source); Path sdk = prepareSdk();
         step(3, "准备应用签名"); prepareSigning();
         step(4, "配置 Key"); String key = readKey();
         Path signing = source.resolve(".local/signing"); Files.createDirectories(signing);
@@ -429,8 +524,7 @@ public class OneClick {
         Path target = output();
         step(5, "编译 APK"); System.out.println("首次编译可能需要几分钟……");
         Map<String, String> env = Map.of("ANDROID_HOME", sdk.toString(), "ANDROID_SDK_ROOT", sdk.toString());
-        mustRun(source, env, batch(source.resolve(WINDOWS ? "gradlew.bat" : "gradlew"), "--no-daemon", "--console=plain",
-                "-Pkotlin.compiler.execution.strategy=in-process", "-Pandroid.builder.sdkDownload=false", ":app:assembleRelease"));
+        buildApk(source, env);
         Path apk = source.resolve("app/build/outputs/apk/release/app-release.apk");
         if (!Files.isRegularFile(apk)) throw new IOException("未生成 APK");
         mustRun(source, env, batch(sdk.resolve("build-tools/35.0.0/apksigner" + (WINDOWS ? ".bat" : "")), "verify", "--verbose", apk.toString()));

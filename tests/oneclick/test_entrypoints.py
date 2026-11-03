@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import subprocess
 import sys
@@ -30,10 +31,11 @@ with tempfile.TemporaryDirectory(prefix='ibudaoa-entry-test-') as directory:
     classes = root / 'classes'
     classes.mkdir()
     run([str(JDK / 'bin/javac'), '-d', str(classes), str(PROJECT / 'scripts/OneClick.java'),
-         str(PROJECT / 'tests/oneclick/OneClickTest.java')])
+         str(PROJECT / 'tests/oneclick/OneClickTest.java'), str(PROJECT / 'tests/oneclick/DownloadTest.java')])
     output = run([str(JDK / 'bin/java'), '-cp', str(classes), 'OneClickTest'])
-    assert 'PASS 24 checks' in output, output
-    print('Shared engine: PASS 24 checks')
+    result = re.search(r'PASS \d+ checks', output)
+    assert result, output
+    print('Shared engine: ' + result.group())
 
     # An actual terminal is necessary to prove readPassword hides the key.
     master, slave = pty.openpty()
@@ -139,7 +141,18 @@ foreach($match in [regex]::Matches($readme,'(?s)```powershell\\r?\\n(.*?)```')) 
         appdata = root / 'local app data'
         appdata.mkdir()
         psenv.update(OS='Windows_NT', PROCESSOR_ARCHITECTURE='AMD64', LOCALAPPDATA=str(appdata))
-        ps_script = PROJECT / 'scripts/oneclick.ps1'
+        original_ps = (PROJECT / 'scripts/oneclick.ps1').read_text(encoding='utf-8-sig')
+        start = original_ps.index('function Get-Download(')
+        end = original_ps.index('function Get-LatestRevision', start)
+        transport = root / 'transport.ps1'
+        transport.write_text(original_ps[start:end], encoding='utf-8-sig')
+        # Control-flow fixtures replace transport only; the exact real helper is tested over HTTPS separately.
+        mock_transport = '''function Get-Download([string[]]$Urls,[string]$Destination,[string]$Sha256='') {
+ Invoke-WebRequest -Uri $Urls[0] -OutFile $Destination
+}
+'''
+        ps_script = root / 'oneclick-fixture.ps1'
+        ps_script.write_text(original_ps[:start] + mock_transport + original_ps[end:], encoding='utf-8-sig')
         wrapper = root / 'entry-fixture.ps1'
         wrapper.write_text('''param([string]$Mode)
 if($env:TEST_ASCII_CONSOLE -eq '1') {
@@ -152,17 +165,16 @@ function Get-CimInstance {
   [pscustomobject]@{ProcessId=999999;ParentProcessId=0;Name='java.exe';CommandLine=$env:LOCALAPPDATA+'/ibudaoa/tools/jdk/bin/java.exe OneClick.java'}
  }
 }
-function Invoke-RestMethod {
- if($env:TEST_GATE) {
-  [IO.File]::WriteAllText($env:TEST_GATE,'ready')
-  while($true){[Threading.Thread]::Sleep(100)}
- }
- return @([pscustomobject]@{sha=('a'*40)})
-}
 function Invoke-WebRequest {
- param($Uri,$OutFile,$TimeoutSec,$Headers,[switch]$UseBasicParsing)
+ param($Uri,$OutFile)
  if($env:TEST_NETWORK_FAIL -eq '1'){throw 'fixture network failure'}
- [IO.File]::WriteAllText($OutFile,'// fixture engine')
+ if($Uri -like '*/commits?*') {
+  if($env:TEST_GATE) {
+   [IO.File]::WriteAllText($env:TEST_GATE,'ready')
+   while($true){[Threading.Thread]::Sleep(100)}
+  }
+  [IO.File]::WriteAllText($OutFile,'[{"sha":"' + ('a'*40) + '"}]')
+ } else {[IO.File]::WriteAllText($OutFile,'// fixture engine')}
 }
 & $env:TEST_ENTRY $Mode
 exit $LASTEXITCODE
@@ -259,3 +271,12 @@ exit $LASTEXITCODE
         assert not (appdata / '.ibudaoa-oneclick.lock').exists()
         print('PowerShell cleanup control flow (Linux fixture): PASS')
         print('PowerShell stale lock / active worker / kill + interrupt recovery / concurrency / UTF-8 / config preservation: PASS')
+
+    certificate = root / 'localhost.p12'
+    run([str(JDK / 'bin/keytool'), '-genkeypair', '-keystore', str(certificate), '-storetype', 'PKCS12',
+         '-alias', 'test', '-storepass', 'changeit', '-keypass', 'changeit', '-keyalg', 'RSA',
+         '-keysize', '2048', '-validity', '2', '-dname', 'CN=localhost', '-ext', 'SAN=dns:localhost', '-noprompt'])
+    transport_command = [str(JDK / 'bin/java'), '-cp', str(classes), 'DownloadTest', str(root), str(certificate)]
+    if PWSH:
+        transport_command += [str(PWSH), str(PROJECT / 'tests/oneclick/Test-Transport.ps1')]
+    print(run(transport_command).strip())

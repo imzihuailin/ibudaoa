@@ -25,7 +25,7 @@
 
 无需 Git、Java 或 Android Studio。每次执行都会下载默认分支最新源码；工具、Key 和签名会保留供下次使用。首次运行需要联网下载工具并接受 Android SDK 许可：**y 同意，N 拒绝**。
 
-支持 Windows x64、Linux x64、macOS Intel / Apple Silicon。请在普通用户的终端执行，无需管理员权限。macOS / Linux 使用系统的 Bash、curl 和 tar。
+支持 Windows x64、Linux x64。请在普通用户的终端执行，无需管理员权限。Linux 使用系统的 Bash、curl 和 tar。
 
 **Windows：打开 PowerShell，粘贴整行命令。**
 
@@ -33,7 +33,7 @@
 & { $p = Join-Path ([IO.Path]::GetTempPath()) ('ibudaoa-' + [guid]::NewGuid() + '.ps1'); try { Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/imzihuailin/ibudaoa/HEAD/scripts/oneclick.ps1' -OutFile $p; powershell -NoProfile -ExecutionPolicy Bypass -File $p build } finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue } }
 ```
 
-**macOS / Linux：打开终端，粘贴整行命令。**
+**Linux：打开终端，粘贴整行命令。**
 
 ```sh
 bash -c 'set -e; p=$(mktemp); trap '\''rm -f "$p"'\'' EXIT; curl -fL --retry 2 https://raw.githubusercontent.com/imzihuailin/ibudaoa/HEAD/scripts/oneclick.sh -o "$p"; bash "$p" build'
@@ -45,11 +45,15 @@ bash -c 'set -e; p=$(mktemp); trap '\''rm -f "$p"'\'' EXIT; curl -fL --retry 2 h
 
 网络或编译失败时，处理终端显示的问题后重新执行同一命令。脚本不会将旧 APK 报为本次构建成功。
 
+Java 优先使用清华镜像，Gradle 优先使用华为云镜像，编译依赖优先使用阿里云镜像；失败后尝试官方来源。Java 与 Gradle 文件保留官方 SHA-256 校验。脚本负责的下载显示来源、大小和速度，连接超时 15 秒、连续 30 秒无数据后重试，每个来源最多尝试两次。镜像依赖网络失败时会用官方仓库重试一次，普通编译错误不会重复构建。
+
+Android SDK 所需版本尚未找到经过验证的完整国内镜像，仍使用官方源；源码和入口脚本仍从 GitHub 下载。因此不能保证所有网络环境下都无需代理。镜像配置仅用于本工具的构建，不修改电脑的全局开发环境。
+
 Windows 中途退出后，直接重新执行同一命令即可：残留旧锁会自动处理，未完成的工具下载和解压会重新准备，已有 Key、签名和完整缓存继续保留。另一个构建仍在运行时会提示等待，不会同时覆盖文件。
 
 ### 文件位置与备份
 
-| 内容 | Windows | macOS / Linux |
+| 内容 | Windows | Linux |
 | --- | --- | --- |
 | Key、签名和配置 | `%LOCALAPPDATA%\ibudaoa\config` | `~/.local/share/ibudaoa/config` |
 | 源码和编译产物 | `%LOCALAPPDATA%\ibudaoa\work` | `~/.cache/ibudaoa/work` |
@@ -68,7 +72,7 @@ Windows PowerShell：
 & { $p = Join-Path ([IO.Path]::GetTempPath()) ('ibudaoa-' + [guid]::NewGuid() + '.ps1'); try { Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/imzihuailin/ibudaoa/HEAD/scripts/oneclick.ps1' -OutFile $p; powershell -NoProfile -ExecutionPolicy Bypass -File $p uninstall } finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue } }
 ```
 
-macOS / Linux：
+Linux：
 
 ```sh
 bash -c 'set -e; p=$(mktemp); trap '\''rm -f "$p"'\'' EXIT; curl -fL --retry 2 https://raw.githubusercontent.com/imzihuailin/ibudaoa/HEAD/scripts/oneclick.sh -o "$p"; bash "$p" uninstall'
