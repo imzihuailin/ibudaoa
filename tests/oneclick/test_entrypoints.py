@@ -13,6 +13,11 @@ import subprocess
 import sys
 import tempfile
 import time
+import termios
+import io
+import tarfile
+import zipfile
+import hashlib
 
 PROJECT = Path(__file__).resolve().parents[2]
 JDK = Path(sys.argv[1]).resolve()
@@ -37,13 +42,20 @@ with tempfile.TemporaryDirectory(prefix='ibudaoa-entry-test-') as directory:
     assert result, output
     print('Shared engine: ' + result.group())
 
-    # An actual terminal is necessary to prove readPassword hides the key.
+    import shlex
+    for snippet in re.findall(r'```sh\n(.*?)```', (PROJECT / 'README.md').read_text(), re.S):
+        run(['bash', '-n', '-c', snippet])
+        if snippet.startswith('bash -c '):
+            run(['bash', '-n', '-c', shlex.split(snippet)[2]])
+    print('README Bash command syntax: PASS')
+
+    # An actual terminal verifies star masking, editing, paste, and reuse.
     master, slave = pty.openpty()
     process = subprocess.Popen([str(JDK / 'bin/java'), '-cp', str(classes), 'OneClickTest', 'key'],
                                stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
     os.close(slave)
     transcript = b''
-    sent_invalid = sent_key = False
+    sent_invalid = sent_key = sent_reuse = sent_binding = False
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         if select.select([master], [], [], 0.2)[0]:
@@ -54,26 +66,103 @@ with tempfile.TemporaryDirectory(prefix='ibudaoa-entry-test-') as directory:
             if not data:
                 break
             transcript += data
+            if not sent_binding and '确认已完成绑定后，按回车继续'.encode() in transcript:
+                assert '请输入高德'.encode() not in transcript, transcript.decode(errors='replace')
+                os.write(master, b'\n')
+                sent_binding = True
             if not sent_invalid and '请输入高德'.encode() in transcript:
                 os.write(master, b'invalid\n')
                 sent_invalid = True
             if sent_invalid and not sent_key and '请重新输入'.encode() in transcript:
                 # Wait for the next prompt so input cannot arrive before echo is disabled.
                 if transcript.count('请输入高德'.encode()) >= 2:
-                    os.write(master, b'a' * 32 + b'\n')
+                    os.write(master, b'a' * 31 + b'b\x7fa\n')
                     sent_key = True
+            if sent_key and not sent_reuse and '直接回车复用'.encode() in transcript:
+                os.write(master, b'\n')
+                sent_reuse = True
     os.close(master)
     assert process.wait(timeout=5) == 0, transcript.decode(errors='replace')
     assert b'KEY_PASS' in transcript and b'a' * 32 not in transcript, transcript.decode(errors='replace')
-    print('Hidden Key + invalid input retry (real PTY): PASS')
+    assert b'*' * 32 in transcript, transcript.decode(errors='replace')
+    assert b'FOLDER:\x1b]8;;file:///' in transcript and b'/config/' in transcript, transcript.decode(errors='replace')
+    print('Star-masked Key + invalid retry / paste / backspace / reuse (real PTY): PASS')
 
-    # Exercise Bash control flow with network/Java stubbed, including post-JVM cleanup.
+    master, slave = pty.openpty()
+    original_terminal = termios.tcgetattr(slave)
+    process = subprocess.Popen([str(JDK / 'bin/java'), '-cp', str(classes), 'OneClickTest', 'cancel-key'],
+                               stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+    transcript = b''
+    deadline = time.monotonic() + 15
+    sent_cancel = False
+    while time.monotonic() < deadline and process.poll() is None:
+        if select.select([master], [], [], 0.2)[0]:
+            transcript += os.read(master, 65536)
+            if not sent_cancel and '请输入高德'.encode() in transcript:
+                os.write(master, b'abc\x04')
+                sent_cancel = True
+    assert process.wait(timeout=5) == 0, transcript.decode(errors='replace')
+    while select.select([master], [], [], 0)[0]:
+        transcript += os.read(master, 65536)
+    assert b'KEY_CANCEL_PASS' in transcript and b'abc' not in transcript, transcript.decode(errors='replace')
+    assert termios.tcgetattr(slave) == original_terminal, 'terminal settings not restored after cancellation'
+    os.close(slave)
+    os.close(master)
+    print('Masked input cancellation + terminal restoration (real PTY): PASS')
+
+    # Exercise archive fallback and native offline uninstall with Java/network stubbed.
+    fixtures = {}
+    files = {'gradlew': b'#!/bin/sh', 'app/build.gradle.kts': b'// fixture',
+             'scripts/OneClick.java': b'// fixture engine',
+             'scripts/download-manifest.properties': b'# fixture'}
+    for kind in ['valid', 'traversal', 'link']:
+        archive = root / (kind + '.tar.gz')
+        with tarfile.open(archive, 'w:gz') as tar:
+            for name, data in files.items():
+                entry = tarfile.TarInfo('ibudaoa-main/' + name)
+                entry.size = len(data)
+                tar.addfile(entry, io.BytesIO(data))
+            if kind == 'traversal':
+                entry = tarfile.TarInfo('ibudaoa-main/../../escape')
+                entry.size = 1
+                tar.addfile(entry, io.BytesIO(b'x'))
+            if kind == 'link':
+                entry = tarfile.TarInfo('ibudaoa-main/link')
+                entry.type = tarfile.SYMTYPE
+                entry.linkname = str(root)
+                tar.addfile(entry)
+        fixtures[kind] = archive
+    html = root / 'html.tar.gz'
+    html.write_text('<html>not an archive</html>')
+    fixtures['html'] = html
+    zip_fixture = root / 'source.zip'
+    with zipfile.ZipFile(zip_fixture, 'w') as archive:
+        for name, data in files.items():
+            archive.writestr('ibudaoa-main/' + name, data)
+
+    bad_zips = []
+    for kind in ['traversal', 'link', 'html']:
+        candidate = root / (kind + '.zip')
+        if kind == 'html':
+            candidate.write_text('<html>not a zip</html>')
+        else:
+            with zipfile.ZipFile(candidate, 'w') as archive:
+                for name, data in files.items():
+                    archive.writestr('ibudaoa-main/' + name, data)
+                if kind == 'traversal':
+                    archive.writestr('ibudaoa-main/../../escape', 'bad')
+                else:
+                    entry = zipfile.ZipInfo('ibudaoa-main/link')
+                    entry.create_system = 3
+                    entry.external_attr = 0o120777 << 16
+                    archive.writestr(entry, str(root))
+        bad_zips.append(candidate)
+
     fake = root / 'bin'
     fake.mkdir()
     fake_java = fake / 'java'
     fake_java.write_text('''#!/usr/bin/env bash
 if [ "$1" = -version ]; then echo 'openjdk version "17.0.1"'; exit 0; fi
-if [ "${FAKE_JAVA_RESULT:-0}" = 10 ]; then exit 10; fi
 printf '%s\\n' "$@" > "$TEST_CALLS"
 exit "${FAKE_JAVA_RESULT:-0}"
 ''')
@@ -82,14 +171,18 @@ exit "${FAKE_JAVA_RESULT:-0}"
     (fake / 'javac').chmod(0o755)
     curl = fake / 'curl'
     curl.write_text('''#!/usr/bin/env python3
-import json, os, sys
+import os, sys, shutil
 from pathlib import Path
 args=sys.argv[1:]
-destination=Path(args[args.index('-o')+1])
+url=next(a for a in args if a.startswith('https://'))
+with open(os.environ['TEST_DOWNLOADS'],'a') as log: log.write(url+'\\n')
 if os.environ.get('FAKE_NETWORK_FAIL') == '1': sys.exit(22)
-if any('/commits?' in a for a in args):
- destination.write_text(json.dumps([{'sha':'a'*40}],indent=2))
-else: destination.write_text('// fixture engine')
+assert '/archive/refs/heads/main.tar.gz' in url, url
+if os.environ.get('FAIL_FIRST') == '1' and url.startswith('https://ghfast.top/'): sys.exit(22)
+source=os.environ['TEST_ARCHIVE']
+if os.environ.get('FIRST_BAD') and url.startswith('https://ghfast.top/'):
+ source=os.environ['FIRST_BAD']
+shutil.copyfile(source,args[args.index('-o')+1])
 ''')
     curl.chmod(0o755)
     shell = root / 'oneclick.sh'
@@ -97,24 +190,59 @@ else: destination.write_text('// fixture engine')
     user_root = root / '用户 space'
     user_root.mkdir()
     env = dict(os.environ, TEST_USER_ROOT=str(user_root), JAVA_HOME=str(root),
-               TEST_CALLS=str(root / 'calls'), PATH=str(fake) + os.pathsep + os.environ['PATH'])
-    # JAVA_HOME must contain bin/java and bin/javac, provided by the fixture above.
+               TEST_CALLS=str(root / 'calls'), TEST_DOWNLOADS=str(root / 'downloads'),
+               TEST_ARCHIVE=str(fixtures['valid']), PATH=str(fake) + os.pathsep + os.environ['PATH'])
     assert '没有需要清理' in run(['bash', str(shell), 'uninstall'], env=env)
     run(['bash', str(shell), 'build'], env=env)
-    assert 'a' * 40 in (root / 'calls').read_text()
+    digest = hashlib.sha256(fixtures['valid'].read_bytes()).hexdigest()
+    assert digest in (root / 'calls').read_text()
     cache = user_root / '.cache/ibudaoa'
-    assert (cache / 'OneClick.java').is_file()
-    env['FAKE_JAVA_RESULT'] = '10'
-    env['FAKE_NETWORK_FAIL'] = '1'
-    cleanup_output = run(['bash', str(shell), 'uninstall'], env=env)
-    assert '失败阶段' not in cleanup_output, cleanup_output
-    assert not cache.exists(), 'post-JVM removal failed'
-    assert not (user_root / '.cache/.ibudaoa-oneclick.lock').exists()
-    env['FAKE_JAVA_RESULT'] = '0'
-    failed = subprocess.run(['bash', str(shell), 'build'], env=env, capture_output=True)
+    assert (cache / 'OneClick.java').is_file() and (cache / 'uninstall.sh').is_file()
+    assert (cache / 'work/source.sha256').read_text() == digest
+    config = user_root / '.local/share/ibudaoa/config'
+    config.mkdir(parents=True)
+    (config / '.owner').write_text(OWNER)
+    (config / 'signing.keystore').write_text('keep signature')
+    (config / 'amap.key').write_text('a' * 32)
+    for kind in ['html', 'traversal', 'link']:
+        run(['bash', str(shell), 'build'], env=dict(env, FIRST_BAD=str(fixtures[kind])))
+        assert not (root / 'escape').exists()
+        assert (config / 'signing.keystore').read_text() == 'keep signature'
+    run(['bash', str(shell), 'build'], env=dict(env, FAIL_FIRST='1'))
+    assert 'https://gh-proxy.org/' in (root / 'downloads').read_text()
+    for kind in ['html', 'traversal', 'link']:
+        result = subprocess.run(['bash', str(shell), 'build'], env=dict(env, TEST_ARCHIVE=str(fixtures[kind])), capture_output=True)
+        assert result.returncode != 0
+    assert 'api.github.com' not in (root / 'downloads').read_text()
+    failed = subprocess.run(['bash', str(shell), 'build'], env=dict(env, FAKE_NETWORK_FAIL='1'), capture_output=True)
     assert failed.returncode != 0
     assert not (user_root / '.cache/.ibudaoa-oneclick.lock').exists(), 'failed run leaked lock'
-    print('Bash build / offline cleanup / repeat cleanup / network failure: PASS')
+
+    output = root / '输出 space'
+    output.mkdir()
+    apk = output / 'ibudaoa.apk'
+    apk.write_bytes(b'our apk')
+    (output / 'keep.txt').write_text('user file')
+    (config / 'output.path').write_text(str(output))
+    (config / 'output.created').write_text(str(output))
+    (config / 'output.sha256').write_text(hashlib.sha256(apk.read_bytes()).hexdigest())
+    offline = dict(env, FAKE_NETWORK_FAIL='1', FAKE_JAVA_RESULT='99')
+    calls_before = (root / 'calls').read_bytes()
+    downloads_before = (root / 'downloads').read_bytes()
+    local = cache / 'uninstall.sh'
+    assert '已取消' in run(['bash', str(local), 'uninstall'], input='\n', env=offline)
+    assert apk.exists() and config.exists()
+    apk.write_bytes(b'replaced')
+    replaced = subprocess.run(['bash', str(local), 'uninstall'], input='y\n', env=offline, text=True, capture_output=True)
+    assert replaced.returncode != 0 and apk.exists() and config.exists()
+    apk.write_bytes(b'our apk')
+    cleanup = run(['bash', str(local), 'uninstall'], input='y\n', env=offline)
+    assert '清理完成' in cleanup and not cache.exists() and not config.exists() and not apk.exists()
+    assert (output / 'keep.txt').read_text() == 'user file'
+    assert calls_before == (root / 'calls').read_bytes(), 'uninstall invoked Java'
+    assert downloads_before == (root / 'downloads').read_bytes(), 'uninstall used network'
+    assert '没有需要清理' in run(['bash', str(shell), 'uninstall'], env=offline)
+    print('Bash archive fallback / invalid HTML / traversal / links / snapshot / config preservation / fully offline native cleanup: PASS')
 
     if PWSH:
         runtime = root / 'ps-runtime'
@@ -143,7 +271,7 @@ foreach($match in [regex]::Matches($readme,'(?s)```powershell\\r?\\n(.*?)```')) 
         psenv.update(OS='Windows_NT', PROCESSOR_ARCHITECTURE='AMD64', LOCALAPPDATA=str(appdata))
         original_ps = (PROJECT / 'scripts/oneclick.ps1').read_text(encoding='utf-8-sig')
         start = original_ps.index('function Get-Download(')
-        end = original_ps.index('function Get-LatestRevision', start)
+        end = original_ps.index('function Get-SourceSnapshot', start)
         transport = root / 'transport.ps1'
         transport.write_text(original_ps[start:end], encoding='utf-8-sig')
         # Control-flow fixtures replace transport only; the exact real helper is tested over HTTPS separately.
@@ -168,18 +296,21 @@ function Get-CimInstance {
 function Invoke-WebRequest {
  param($Uri,$OutFile)
  if($env:TEST_NETWORK_FAIL -eq '1'){throw 'fixture network failure'}
- if($Uri -like '*/commits?*') {
+ if($env:TEST_FAIL_FIRST -eq '1' -and $Uri -like 'https://ghfast.top/*'){throw 'fixture first-source failure'}
+ if($Uri -like '*main.zip') {
   if($env:TEST_GATE) {
    [IO.File]::WriteAllText($env:TEST_GATE,'ready')
    while($true){[Threading.Thread]::Sleep(100)}
   }
-  [IO.File]::WriteAllText($OutFile,'[{"sha":"' + ('a'*40) + '"}]')
- } else {[IO.File]::WriteAllText($OutFile,'// fixture engine')}
+  $archive=$env:TEST_ARCHIVE
+  if($env:TEST_BAD_FIRST -and $Uri -like 'https://ghfast.top/*'){$archive=$env:TEST_BAD_FIRST}
+  [IO.File]::Copy($archive,$OutFile,$true)
+ } else {throw 'unexpected download'}
 }
 & $env:TEST_ENTRY $Mode
 exit $LASTEXITCODE
 ''')
-        psenv.update(TEST_ENTRY=str(ps_script), TEST_CALLS=str(root / 'ps-calls'))
+        psenv.update(TEST_ENTRY=str(ps_script), TEST_CALLS=str(root / 'ps-calls'), TEST_ARCHIVE=str(zip_fixture))
         command = [str(PWSH), '-NoProfile', '-File', str(wrapper)]
         first = run(command + ['uninstall'], env=psenv)
         assert '没有需要清理' in first, repr(first)
@@ -195,6 +326,7 @@ exit $LASTEXITCODE
         javac.chmod(0o755)
         config = ps_cache / 'config'
         config.mkdir()
+        (config / '.owner').write_text(OWNER)
         (config / 'amap.key').write_text('a' * 32)
         (config / 'signing.keystore').write_bytes(b'keep original signing key')
 
@@ -211,6 +343,14 @@ exit $LASTEXITCODE
         assert not partial_bootstrap.exists(), 'stale download/extraction was not cleaned'
         assert (config / 'amap.key').read_text() == 'a' * 32
         assert (config / 'signing.keystore').read_bytes() == b'keep original signing key'
+
+        run(command + ['build'], env=dict(psenv, TEST_FAIL_FIRST='1'))
+        for bad_archive in bad_zips:
+            run(command + ['build'], env=dict(psenv, TEST_BAD_FIRST=str(bad_archive)))
+            invalid = subprocess.run(command + ['build'], env=dict(psenv, TEST_ARCHIVE=str(bad_archive)), capture_output=True, text=True)
+            assert invalid.returncode != 0 and '所有源码下载来源均失败' in invalid.stdout, invalid.stdout
+            assert not (root / 'escape').exists()
+            assert (config / 'signing.keystore').read_bytes() == b'keep original signing key'
 
         # A legacy worker or orphan JVM is still a real running task; never overwrite its files.
         legacy_lock.mkdir()
@@ -265,8 +405,22 @@ exit $LASTEXITCODE
         assert failed.returncode != 0 and '失败阶段' in failed.stdout, failed.stdout
         assert '????' not in failed.stdout
         run(command + ['build'], env=psenv)
-        psenv['FAKE_JAVA_RESULT'] = '10'
-        assert '清理完成' in run(command + ['uninstall'], env=psenv)
+        ps_output = root / 'PS 输出 space'
+        ps_output.mkdir()
+        ps_apk = ps_output / 'ibudaoa.apk'
+        ps_apk.write_bytes(b'our apk')
+        (ps_output / 'keep.txt').write_text('keep')
+        (config / 'output.path').write_text(str(ps_output))
+        (config / 'output.created').write_text(str(ps_output))
+        (config / 'output.sha256').write_text(hashlib.sha256(ps_apk.read_bytes()).hexdigest())
+        offline = dict(psenv, TEST_NETWORK_FAIL='1', FAKE_JAVA_RESULT='99')
+        assert '已取消' in run(command + ['uninstall'], input='\n', env=offline)
+        ps_apk.write_bytes(b'replaced')
+        refused = subprocess.run(command + ['uninstall'], input='y\n', env=offline, text=True, capture_output=True)
+        assert refused.returncode != 0 and ps_apk.exists() and config.exists(), refused.stdout
+        ps_apk.write_bytes(b'our apk')
+        assert '清理完成' in run(command + ['uninstall'], input='y\n', env=offline)
+        assert not ps_apk.exists() and (ps_output / 'keep.txt').is_file()
         assert not ps_cache.exists()
         assert not (appdata / '.ibudaoa-oneclick.lock').exists()
         print('PowerShell cleanup control flow (Linux fixture): PASS')

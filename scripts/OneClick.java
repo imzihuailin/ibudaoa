@@ -32,7 +32,7 @@ public class OneClick {
     public static void main(String[] args) {
         try {
             if (!WINDOWS && !System.getProperty("os.name").equals("Linux")) throw new IOException("仅支持 Windows 和 Linux");
-            if (args.length != 3 || !Set.of("build", "uninstall").contains(args[0]) || !args[1].matches("[a-f0-9]{40}"))
+            if (args.length != 3 || !Set.of("build", "uninstall").contains(args[0]) || !args[1].matches("[a-f0-9]{64}"))
                 throw new IOException("入口参数无效");
             Path base = WINDOWS ? Path.of(requireEnv("LOCALAPPDATA"), "ibudaoa")
                     : Path.of(System.getProperty("user.home"), ".local", "share", "ibudaoa");
@@ -210,7 +210,12 @@ public class OneClick {
     }
 
     int processLogged(Path directory, Map<String, String> extra, Path log, String... command) throws Exception {
+        return processLogged(directory, extra, log, false, command);
+    }
+
+    int processLogged(Path directory, Map<String, String> extra, Path log, boolean acceptLicenses, String... command) throws Exception {
         ProcessBuilder builder = new ProcessBuilder(command).directory(directory.toFile()).inheritIO();
+        if (acceptLicenses) builder.redirectInput(ProcessBuilder.Redirect.PIPE);
         if (log != null) builder.redirectOutput(ProcessBuilder.Redirect.PIPE).redirectErrorStream(true);
         Map<String, String> env = builder.environment();
         // Do not inherit user hooks that redirect caches or inject arguments/credentials into Gradle.
@@ -234,6 +239,14 @@ public class OneClick {
         Thread hook = new Thread(() -> { child.descendants().forEach(ProcessHandle::destroy); child.destroy(); });
         Runtime.getRuntime().addShutdownHook(hook);
         try {
+            if (acceptLicenses) {
+                // Consent was obtained once by this tool. Only SDK commands receive these answers.
+                try (OutputStream answers = child.getOutputStream()) {
+                    answers.write("y\n".repeat(256).getBytes(StandardCharsets.US_ASCII));
+                } catch (IOException ignored) {
+                    // An already licensed SDK may close stdin immediately; its exit code decides success.
+                }
+            }
             if (log != null) {
                 try (InputStream in = child.getInputStream(); OutputStream out = Files.newOutputStream(log)) {
                     byte[] buffer = new byte[8192];
@@ -276,17 +289,16 @@ public class OneClick {
     static String psLiteral(String value) { return "'" + value.replace("'", "''") + "'"; }
 
     Path prepareSource() throws Exception {
-        Path work = cache.resolve("work");
-        deleteTree(work);
-        Files.createDirectories(work);
-        Path zip = work.resolve("source.zip");
-        download("https://codeload.github.com/imzihuailin/ibudaoa/zip/" + revision, zip);
-        extract(zip, work);
-        Files.delete(zip);
-        Path source = work.resolve("ibudaoa-" + revision);
-        if (!Files.isRegularFile(source.resolve("gradlew")) || !Files.isRegularFile(source.resolve("app/build.gradle.kts")))
-            throw new IOException("源码内容不完整");
-        System.out.println("✓ 源码已准备，版本：" + revision.substring(0, 12));
+        Path source = cache.resolve("work/ibudaoa-main");
+        noLinks(source);
+        Path snapshot = cache.resolve("work/source.sha256");
+        noLinks(snapshot);
+        if (!Files.isRegularFile(snapshot) || !Files.readString(snapshot).equals(revision)
+                || !Files.isRegularFile(source.resolve("gradlew"))
+                || !Files.isRegularFile(source.resolve("app/build.gradle.kts"))
+                || !Files.isRegularFile(source.resolve("scripts/download-manifest.properties")))
+            throw new IOException("本次源码快照不完整，请重新运行入口");
+        System.out.println("✓ 源码已准备，快照 SHA-256：" + revision.substring(0, 12));
         return source;
     }
 
@@ -340,6 +352,7 @@ public class OneClick {
         }
         Path sdk = cache.resolve("tools/android-sdk");
         if (sdkComplete(sdk)) { System.out.println("✓ Android SDK"); return sdk; }
+        System.out.println("Android SDK 尚无已验证完整的国内镜像，本步骤使用 Google 官方源。");
         Path manager = sdk.resolve("cmdline-tools/19.0/bin/sdkmanager" + (WINDOWS ? ".bat" : ""));
         Path toolsReady = manager.getParent().getParent().resolve(".oneclick-complete");
         if (!Files.isRegularFile(manager) || !Files.isRegularFile(toolsReady)) {
@@ -379,9 +392,13 @@ public class OneClick {
         if (!platformComplete(sdk)) deleteTree(sdk.resolve("platforms/android-36"));
         if (!buildToolsComplete(sdk)) deleteTree(sdk.resolve("build-tools/35.0.0"));
         Map<String, String> env = Map.of("ANDROID_HOME", sdk.toString(), "ANDROID_SDK_ROOT", sdk.toString());
-        System.out.println("请阅读接下来显示的 Android SDK 许可。\n输入 y 表示同意，输入 N 表示拒绝。");
-        mustRun(cache, env, batch(manager, "--sdk_root=" + sdk, "--licenses"));
-        mustRun(cache, env, batch(manager, "--sdk_root=" + sdk, "platforms;android-36", "build-tools;35.0.0"));
+        confirmSdkLicenses();
+        for (String[] command : List.of(
+                batch(manager, "--sdk_root=" + sdk, "--licenses"),
+                batch(manager, "--sdk_root=" + sdk, "platforms;android-36", "build-tools;35.0.0"))) {
+            if (processLogged(cache, env, null, true, command) != 0)
+                throw new IOException("SDK 许可接受或安装失败，请查看上方提示");
+        }
         if (!sdkComplete(sdk)) throw new IOException("SDK 安装未完成或许可尚未接受");
         return sdk;
     }
@@ -451,17 +468,94 @@ public class OneClick {
         System.out.println("请保留签名，后续覆盖升级会自动复用。\n备份目录：" + config);
     }
 
+    void confirmSdkLicenses() throws IOException {
+        System.out.println("Android SDK 许可：https://developer.android.com/studio/terms\n"
+                + "本次同意涵盖安装所需的 Android SDK 许可，后续逐项询问由程序自动确认。");
+        System.out.print("是否同意本次安装所需的 Android SDK 许可？[y/N]：");
+        String answer = input.readLine();
+        if (answer == null || !answer.trim().equalsIgnoreCase("y"))
+            throw new IOException("未同意 Android SDK 许可，已停止安装");
+    }
+
+    static String terminalLink(Path path) {
+        return terminalLink(path.toUri().toASCIIString(), path.toString());
+    }
+
+    static String terminalLink(String url, String label) {
+        label = label.replaceAll("[\\p{Cntrl}]", "?");
+        return System.console() == null ? label
+                : "\033]8;;" + url + "\033\\" + label + "\033]8;;\033\\";
+    }
+
+    void confirmMapBinding() throws IOException {
+        String url = "https://console.amap.com/dev/key/app";
+        System.out.println("\n请打开高德控制台，将以上 SHA-1 填入所用 Android Key 的“发布版安全码 SHA1”，"
+                + "并确认包名与上方一致。\n" + terminalLink(url, url));
+        System.out.print("确认已完成绑定后，按回车继续：");
+        if (input.readLine() == null) throw new IOException("绑定确认已取消");
+    }
+
+    String readMaskedKey(String prompt) throws Exception {
+        if (System.console() == null) throw new IOException("请在交互式终端执行命令，以便显示星号输入 Key");
+        String[] command;
+        if (WINDOWS) {
+            String script = """
+                    $ErrorActionPreference='Stop'
+                    [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+                    $value=[Text.StringBuilder]::new()
+                    [Console]::Error.Write($env:IBUDAOA_KEY_PROMPT)
+                    while($true) {
+                        $key=[Console]::ReadKey($true)
+                        if($key.Key -eq 'Enter') { break }
+                        if(($key.Modifiers -band [ConsoleModifiers]::Control) -and $key.Key -in @('C','D','Z')) { exit 130 }
+                        if($key.Key -eq 'Backspace') {
+                            if($value.Length -gt 0) { $value.Length--; [Console]::Error.Write("`b `b") }
+                        } elseif(![char]::IsControl($key.KeyChar) -and $value.Length -lt 256) {
+                            [void]$value.Append($key.KeyChar); [Console]::Error.Write('*')
+                        }
+                    }
+                    [Console]::Error.WriteLine()
+                    [Console]::Write($value.ToString())
+                    """;
+            command = new String[]{"powershell.exe", "-NoProfile", "-EncodedCommand",
+                    Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_16LE))};
+        } else {
+            command = new String[]{"bash", "-c", """
+                    saved=$(stty -g) || exit 1
+                    trap 'stty "$saved"' EXIT
+                    trap 'exit 130' INT TERM
+                    stty -echo -icanon min 1 time 0 || exit 1
+                    printf '%s' "$IBUDAOA_KEY_PROMPT" >&2
+                    value=''
+                    while IFS= read -r -s -n 1 ch; do
+                        case "$ch" in
+                            '') printf '\\n' >&2; printf '%s' "$value"; exit 0 ;;
+                            $'\\177'|$'\\b') if [ -n "$value" ]; then value=${value%?}; printf '\\b \\b' >&2; fi ;;
+                            $'\\004'|$'\\032') exit 130 ;;
+                            *) if [[ "$ch" != [[:cntrl:]] && ${#value} -lt 256 ]]; then value+=$ch; printf '*' >&2; fi ;;
+                        esac
+                    done
+                    exit 130
+                    """};
+        }
+        ProcessBuilder builder = new ProcessBuilder(command).redirectInput(ProcessBuilder.Redirect.INHERIT)
+                .redirectError(ProcessBuilder.Redirect.INHERIT);
+        builder.environment().put("IBUDAOA_KEY_PROMPT", prompt);
+        Process child = builder.start();
+        try {
+            String value = new String(child.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            if (child.waitFor() != 0) throw new IOException("Key 输入已取消");
+            return value;
+        } finally { if (child.isAlive()) child.destroy(); }
+    }
+
     String readKey() throws Exception {
         Path saved = config.resolve("amap.key");
         noLinks(saved);
         String old = Files.exists(saved) ? Files.readString(saved).trim() : "";
         while (true) {
             String prompt = old.matches("[a-fA-F0-9]{32}") ? "输入新 Key，或直接回车复用：" : "请输入高德 Android Key：";
-            Console console = System.console();
-            if (console == null) throw new IOException("请在交互式终端执行命令，以便隐藏输入 Key");
-            char[] chars = console.readPassword("%s", prompt);
-            if (chars == null) throw new IOException("输入已取消");
-            String value = new String(chars).trim(); Arrays.fill(chars, '\0');
+            String value = readMaskedKey(prompt).trim();
             if (value.isEmpty()) value = old;
             if (!value.matches("[a-fA-F0-9]{32}")) { System.out.println("Key 格式不正确，应为 32 位十六进制字符。请重新输入。"); continue; }
             atomicWrite(saved, value.getBytes(StandardCharsets.UTF_8));
@@ -518,9 +612,9 @@ public class OneClick {
     }
 
     void build() throws Exception {
-        step(1, "下载最新源码"); Path source = prepareSource();
+        stage = "下载最新源码"; Path source = prepareSource();
         step(2, "准备编译环境"); System.out.println("✓ Java 17"); prepareGradle(source); Path sdk = prepareSdk();
-        step(3, "准备应用签名"); prepareSigning();
+        step(3, "准备应用签名"); prepareSigning(); confirmMapBinding();
         step(4, "配置 Key"); String key = readKey();
         Path signing = source.resolve(".local/signing"); Files.createDirectories(signing);
         Files.copy(config.resolve("signing.keystore"), signing.resolve("debug.keystore"), StandardCopyOption.REPLACE_EXISTING);
@@ -546,9 +640,8 @@ public class OneClick {
         Path result = target.resolve("ibudaoa.apk");
         atomicWrite(result, Files.readAllBytes(apk));
         atomicWrite(config.resolve("output.sha256"), digest(result, "SHA-256").getBytes(StandardCharsets.UTF_8));
-        String path = result.toString().replaceAll("[\\p{Cntrl}]", "?");
-        String link = "\033]8;;" + result.toUri().toASCIIString() + "\033\\" + path + "\033]8;;\033\\";
-        System.out.println("\n构建完成\n\nAPK：" + (System.console() != null ? link : path) + "\n\n将 APK 传到手机安装即可。");
+        System.out.println("\n构建完成\n\n输出文件夹：" + terminalLink(target)
+                + "\nAPK 文件名：ibudaoa.apk\n\n将 APK 传到手机安装即可。");
     }
 
     boolean uninstall() throws Exception {

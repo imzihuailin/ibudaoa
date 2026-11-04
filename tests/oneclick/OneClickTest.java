@@ -29,12 +29,48 @@ public class OneClickTest {
     public static void main(String[] args) throws Exception {
         Path root = Files.createTempDirectory("ibudaoa 测试 space ");
         try {
+            if (args.length > 0 && args[0].equals("cancel-key")) {
+                OneClick app = new OneClick(root.resolve("cache"), root.resolve("config"), "a".repeat(40));
+                app.own(app.config);
+                rejects(app::readKey, "cancel masked input");
+                check(!Files.exists(app.config.resolve("amap.key")), "cancel does not save key");
+                System.out.println("KEY_CANCEL_PASS"); return;
+            }
             if (args.length > 0 && args[0].equals("key")) {
                 OneClick app = new OneClick(root.resolve("cache"), root.resolve("config"), "a".repeat(40));
-                app.own(app.config); app.readKey();
+                app.own(app.config); app.confirmMapBinding(); app.readKey(); app.readKey();
+                System.out.println("FOLDER:" + OneClick.terminalLink(app.config));
                 check(Files.readString(app.config.resolve("amap.key")).equals("a".repeat(32)), "key saved");
                 System.out.println("KEY_PASS"); return;
             }
+            OneClick prepared = app(root.resolve("prepared"), "");
+            rejects(prepared::prepareSource, "missing snapshot must not download or build");
+            Path source = prepared.cache.resolve("work/ibudaoa-main");
+            Files.createDirectories(source.resolve("app")); Files.createDirectories(source.resolve("scripts"));
+            Files.writeString(source.resolve("gradlew"), "fixture");
+            Files.writeString(source.resolve("app/build.gradle.kts"), "fixture");
+            Files.writeString(source.resolve("scripts/download-manifest.properties"), "fixture");
+            Files.writeString(prepared.cache.resolve("work/source.sha256"), "a".repeat(40));
+            check(prepared.prepareSource().equals(source), "reuse exact prepared source snapshot");
+            Files.writeString(prepared.cache.resolve("work/source.sha256"), "b".repeat(40));
+            rejects(prepared::prepareSource, "mismatched snapshot must fail");
+            OneClick consent = app(root.resolve("consent"), "y\n");
+            consent.confirmSdkLicenses();
+            check(consent.processLogged(consent.cache, Map.of(), null, true, "bash", "-c",
+                    "for i in {1..12}; do read -r answer; [ \"$answer\" = y ] || exit 9; done") == 0,
+                    "one consent answers multiple SDK prompts");
+            OneClick denied = app(root.resolve("denied"), "\n");
+            rejects(denied::confirmSdkLicenses, "license default rejects");
+            OneClick refused = app(root.resolve("refused"), "N\n");
+            rejects(refused::confirmSdkLicenses, "license N rejects");
+            OneClick eof = app(root.resolve("eof"), "");
+            rejects(eof::confirmSdkLicenses, "license EOF rejects");
+            rejects(eof::confirmMapBinding, "binding EOF cancels");
+            OneClick bound = app(root.resolve("bound"), "\n");
+            bound.confirmMapBinding();
+            check(bound.input.readLine() == null, "binding enter consumed before key prompt");
+            Path folder = root.resolve("中文 APK space"); Files.createDirectories(folder);
+            check(OneClick.terminalLink(folder).equals(folder.toString()), "plain folder output is copyable");
             OneClick cancel = app(root.resolve("cancel"), "\n");
             recordOutput(cancel, root.resolve("cancel-output"), true);
             check(!cancel.uninstall(), "default cancels");

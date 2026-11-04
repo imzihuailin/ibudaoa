@@ -114,13 +114,94 @@ function Get-Download([string[]]$Urls, [string]$Destination, [string]$Sha256 = '
     }
     throw "所有下载来源均失败：$lastFailure"
 }
-function Get-LatestRevision {
-    $metadata = Join-Path $scratch 'commit.json'
-    Get-Download 'https://api.github.com/repos/imzihuailin/ibudaoa/commits?per_page=1' $metadata
-    $commit = @([IO.File]::ReadAllText($metadata) | ConvertFrom-Json)
-    $value = $commit[0].sha
-    if ($value -notmatch '^[a-f0-9]{40}$') { throw '无法确定最新源码版本。' }
-    return $value
+function Get-SourceSnapshot {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $original = 'https://github.com/imzihuailin/ibudaoa/archive/refs/heads/main.zip'
+    $archive = Join-Path $scratch 'source.zip'
+    foreach ($prefix in @('https://ghfast.top/', 'https://gh-proxy.org/', '')) {
+        $zip = $null
+        try {
+            Get-Download ($prefix + $original) $archive
+            $zip = [IO.Compression.ZipFile]::OpenRead($archive)
+            if ($zip.Entries.Count -eq 0) { throw '源码包为空。' }
+            foreach ($entry in $zip.Entries) {
+                $name = $entry.FullName
+                $type = ($entry.ExternalAttributes -shr 16) -band 0xF000
+                if ($name -notmatch '^ibudaoa-main(/|$)' -or $name -match '(^|/)\.\.(/|$)|[\\:\x00-\x1f]' -or
+                    $type -notin @(0, 0x4000, 0x8000)) { throw '源码包含不安全路径或链接。' }
+            }
+            $unpack = Join-Path $scratch 'source'
+            if (Test-Path -LiteralPath $unpack) { Remove-OwnedTree $unpack }
+            New-Item -ItemType Directory -Path $unpack | Out-Null
+            foreach ($entry in $zip.Entries) {
+                $destination = Join-Path $unpack $entry.FullName
+                if ($entry.FullName.EndsWith('/')) {
+                    New-Item -ItemType Directory -Force -Path $destination | Out-Null
+                } else {
+                    New-Item -ItemType Directory -Force -Path ([IO.Path]::GetDirectoryName($destination)) | Out-Null
+                    [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $destination, $false)
+                }
+            }
+            $root = Join-Path $unpack 'ibudaoa-main'
+            foreach ($required in @('gradlew', 'app/build.gradle.kts', 'scripts/OneClick.java', 'scripts/download-manifest.properties')) {
+                if (!(Test-Path -LiteralPath (Join-Path $root $required) -PathType Leaf)) { throw '源码包内容不完整。' }
+            }
+            $revision = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+            $work = Join-Path $cache 'work'
+            Assert-NoLink $work
+            if (Test-Path -LiteralPath $work) { Remove-OwnedTree $work }
+            Move-Item -LiteralPath $unpack -Destination $work
+            [IO.File]::WriteAllText((Join-Path $work 'source.sha256'), $revision)
+            return $revision
+        } catch {
+            Write-Host "源码来源不可用：$($_.Exception.Message)。正在切换来源。"
+        } finally { if ($zip) { $zip.Dispose() } }
+    }
+    throw '所有源码下载来源均失败。'
+}
+function Invoke-OfflineUninstall {
+    $config = Join-Path $cache 'config'
+    Assert-NoLink $config
+    if (Test-Path -LiteralPath $config) {
+        $marker = Join-Path $config '.owner'
+        Assert-NoLink $marker
+        if (!(Test-Path -LiteralPath $marker -PathType Leaf) -or [IO.File]::ReadAllText($marker) -ne $owner) {
+            throw "不是本工具创建的配置目录：$config"
+        }
+    }
+    Write-Host "将删除本工具保存的源码、工具、缓存、Key、签名及输出 APK。`n缓存目录：$cache`n配置目录：$config"
+    foreach ($record in @('output.path', 'output.sha256', 'output.created')) { Assert-NoLink (Join-Path $config $record) }
+    $output = $null
+    $record = Join-Path $config 'output.path'
+    if (Test-Path -LiteralPath $record -PathType Leaf) {
+        $output = [IO.File]::ReadAllText($record)
+        if (![IO.Path]::IsPathRooted($output)) { throw '输出路径无效。' }
+        Assert-NoLink $output
+        Write-Host "输出 APK：$(Join-Path $output 'ibudaoa.apk')"
+    }
+    Write-Host "删除签名后，将无法用新签名覆盖升级原来安装的应用。`n如需保留升级能力，请先备份整个配置目录：$config"
+    $answer = Read-Host '确认全部删除？[y/N]'
+    if (!$answer -or $answer.Trim() -ine 'y') { Write-Host '已取消，未删除文件。'; return }
+    if ($output) {
+        $apk = Join-Path $output 'ibudaoa.apk'
+        Assert-NoLink $apk
+        if (Test-Path -LiteralPath $apk) {
+            $fingerprint = Join-Path $config 'output.sha256'
+            if (!(Test-Path -LiteralPath $fingerprint -PathType Leaf) -or
+                (Get-FileHash -Algorithm SHA256 -LiteralPath $apk).Hash -ine [IO.File]::ReadAllText($fingerprint)) {
+                throw "输出 APK 已被替换，保留该文件并停止清理：$apk"
+            }
+            Remove-Item -LiteralPath $apk
+        }
+        $created = Join-Path $config 'output.created'
+        if ((Test-Path -LiteralPath $created -PathType Leaf) -and [IO.File]::ReadAllText($created) -eq $output -and
+            (Test-Path -LiteralPath $output -PathType Container) -and @(Get-ChildItem -Force -LiteralPath $output).Count -eq 0) {
+            [IO.Directory]::Delete($output)
+        }
+    }
+    Assert-Owned
+    Remove-OwnedTree $cache
+    Write-Host '清理完成。'
 }
 function Test-Jdk([string]$Java) {
     if (!$Java -or !(Test-Path -LiteralPath $Java)) { return $false }
@@ -197,18 +278,22 @@ try {
         New-Item -ItemType Directory -Path $cache | Out-Null
         [IO.File]::WriteAllText((Join-Path $cache '.owner'), $owner)
     }
-    # Keep partial downloads/extraction inside the owned cache and overwrite them on retry.
+    if ($Mode -eq 'uninstall') { Invoke-OfflineUninstall; return }
+    # Persist the complete local entry before downloads, so uninstall is always offline.
+    $localUninstall = Join-Path $cache 'uninstall.ps1'
+    Assert-NoLink $localUninstall
+    if ([IO.Path]::GetFullPath($PSCommandPath) -ne [IO.Path]::GetFullPath($localUninstall)) {
+        Copy-Item -LiteralPath $PSCommandPath -Destination $localUninstall -Force
+    }
     $scratch = Join-Path $cache 'bootstrap'
     Assert-NoLink $scratch
     if (Test-Path -LiteralPath $scratch) { Remove-OwnedTree $scratch }
     New-Item -ItemType Directory -Path $scratch | Out-Null
     Write-Host 'ibudaoa 一键工具'
-    $stage = '查询最新版本'
-    $engine = Join-Path $cache 'OneClick.java'
-    $revision = '0000000000000000000000000000000000000000'
-    if ($Mode -eq 'build' -or !(Test-Path -LiteralPath $engine)) {
-        $revision = Get-LatestRevision
-    }
+    $stage = '下载最新源码'
+    Write-Host '[1/5] 下载最新源码'
+    $revision = Get-SourceSnapshot
+    $source = Join-Path $cache 'work/ibudaoa-main'
     $stage = '准备 Java 17'
     $java = $null
     if ($env:JAVA_HOME) {
@@ -221,12 +306,11 @@ try {
     }
     if (!$java) {
         $jdk = Join-Path $cache 'tools\jdk'
+        Assert-NoLink $jdk
         $java = Join-Path $jdk 'bin\java.exe'
         if (!(Test-Jdk $java)) {
             Write-Host '正在下载 Java 17……'
-            if ($revision -eq '0000000000000000000000000000000000000000') { $revision = Get-LatestRevision }
-            $manifest = Join-Path $scratch 'download-manifest.properties'
-            Get-Download "https://raw.githubusercontent.com/imzihuailin/ibudaoa/$revision/scripts/download-manifest.properties" $manifest
+            $manifest = Join-Path $source 'scripts/download-manifest.properties'
             $downloads = ConvertFrom-StringData ([IO.File]::ReadAllText($manifest))
             $checksum = $downloads['jdk.windows.x64.sha256']
             $sources = @($downloads['jdk.windows.x64.mirror'], $downloads['jdk.windows.x64.official'])
@@ -242,32 +326,13 @@ try {
             Move-Item -LiteralPath $roots[0].FullName -Destination $jdk
         }
     }
-    $stage = '下载构建与清理程序'
-    $localEngine = Join-Path $scratch 'OneClick.java'
-    if ($Mode -eq 'uninstall' -and (Test-Path -LiteralPath $engine)) {
-        Copy-Item -LiteralPath $engine -Destination $localEngine
-    } else {
-        Get-Download "https://raw.githubusercontent.com/imzihuailin/ibudaoa/$revision/scripts/OneClick.java" $localEngine
-        $stagedEngine = Join-Path $cache 'OneClick.java.new'
-        Assert-NoLink $stagedEngine
-        Assert-NoLink $engine
-        Copy-Item -LiteralPath $localEngine -Destination $stagedEngine -Force
-        if (Test-Path -LiteralPath $engine) { [IO.File]::Replace($stagedEngine, $engine, [NullString]::Value) }
-        else { [IO.File]::Move($stagedEngine, $engine) }
-    }
-    $stage = $Mode
-    & $java '-Dfile.encoding=UTF-8' $localEngine $Mode $revision $cache
-    $result = $LASTEXITCODE
-    if ($result -eq 10) {
-        # Wait until Java exits before deleting its cached executable and DLLs.
-        Assert-Owned
-        foreach ($child in Get-ChildItem -Force -LiteralPath $cache) {
-            if ($child.Name -ne '.owner') { Remove-OwnedTree $child.FullName }
-        }
-        Remove-Item -LiteralPath (Join-Path $cache '.owner') -Force
-        [IO.Directory]::Delete($cache)
-        Write-Host '清理完成。'
-    } elseif ($result -ne 0) { throw "操作未完成，返回码：$result" }
+    $stage = '构建'
+    $engine = Join-Path $cache 'OneClick.java'
+    Assert-NoLink $engine
+    Copy-Item -LiteralPath (Join-Path $source 'scripts/OneClick.java') -Destination $engine -Force
+    & $java '-Dfile.encoding=UTF-8' $engine build $revision $cache
+    if ($LASTEXITCODE -ne 0) { throw "操作未完成，返回码：$LASTEXITCODE" }
+
 } catch {
     Write-Host "失败阶段：$stage。$($_.Exception.Message)" -ForegroundColor Red
     Write-Host '请处理上述问题后重新执行同一命令；中断后无需手动删除锁文件。' -ForegroundColor Red
