@@ -264,6 +264,9 @@ foreach($match in [regex]::Matches($readme,'(?s)```powershell\\r?\\n(.*?)```')) 
 'PowerShell entry + README command syntax: PASS'
 ''')
         print(run([str(PWSH), '-NoProfile', '-File', str(checker), str(PROJECT)], env=psenv).strip())
+        cleanup = run([str(PWSH), '-NoProfile', '-File', str(PROJECT / 'tests/oneclick/Test-Cleanup.ps1'),
+                       str(PROJECT), str(root / 'cleanup-regression')], env=psenv)
+        print(cleanup.splitlines()[-1])
         # Execute the PowerShell cleanup path on Linux with a fake Windows environment.
         # This validates script control flow, not Windows cmd.exe or ACL behavior.
         appdata = root / 'local app data'
@@ -282,7 +285,7 @@ foreach($match in [regex]::Matches($readme,'(?s)```powershell\\r?\\n(.*?)```')) 
         ps_script = root / 'oneclick-fixture.ps1'
         ps_script.write_text(original_ps[:start] + mock_transport + original_ps[end:], encoding='utf-8-sig')
         wrapper = root / 'entry-fixture.ps1'
-        wrapper.write_text('''param([string]$Mode)
+        wrapper.write_text('''param([string]$Mode, [switch]$Recover)
 if($env:TEST_ASCII_CONSOLE -eq '1') {
  [Console]::OutputEncoding=[Text.Encoding]::ASCII
  [Console]::InputEncoding=[Text.Encoding]::ASCII
@@ -307,7 +310,7 @@ function Invoke-WebRequest {
   [IO.File]::Copy($archive,$OutFile,$true)
  } else {throw 'unexpected download'}
 }
-& $env:TEST_ENTRY $Mode
+& $env:TEST_ENTRY $Mode -Recover:$Recover
 exit $LASTEXITCODE
 ''')
         psenv.update(TEST_ENTRY=str(ps_script), TEST_CALLS=str(root / 'ps-calls'), TEST_ARCHIVE=str(zip_fixture))
@@ -423,6 +426,24 @@ exit $LASTEXITCODE
         assert not ps_apk.exists() and (ps_output / 'keep.txt').is_file()
         assert not ps_cache.exists()
         assert not (appdata / '.ibudaoa-oneclick.lock').exists()
+        # A legacy uninstall may have deleted .owner before failing on a long cache path.
+        (ps_cache / 'gradle/deep').mkdir(parents=True)
+        (ps_cache / 'gradle/deep/leftover.pom').write_text('leftover')
+        invalid_mode = subprocess.run(command + ['build', '-Recover'], env=offline, text=True, capture_output=True)
+        assert invalid_mode.returncode != 0 and ps_cache.exists()
+        missing_marker = subprocess.run(command + ['uninstall'], env=offline, text=True, capture_output=True)
+        assert missing_marker.returncode != 0 and '-Recover' in missing_marker.stdout and '失败阶段：清理' in missing_marker.stdout
+        assert '已取消' in run(command + ['uninstall', '-Recover'], input='y\n', env=offline)
+        assert ps_cache.exists()
+        assert '清理完成' in run(command + ['uninstall', '-Recover'], input=str(ps_cache) + '\n', env=offline)
+        assert not ps_cache.exists()
+        external = root / 'outside-recovery'
+        external.mkdir()
+        (external / 'keep').write_text('keep')
+        ps_cache.symlink_to(external, target_is_directory=True)
+        linked = subprocess.run(command + ['uninstall', '-Recover'], input=str(ps_cache) + '\n', env=offline, text=True, capture_output=True)
+        assert linked.returncode != 0 and (external / 'keep').read_text() == 'keep'
+        ps_cache.unlink()
         print('PowerShell cleanup control flow (Linux fixture): PASS')
         print('PowerShell stale lock / active worker / kill + interrupt recovery / concurrency / UTF-8 / config preservation: PASS')
 

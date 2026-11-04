@@ -1,4 +1,4 @@
-﻿param([ValidateSet('build', 'uninstall')][string]$Mode = 'build')
+﻿param([ValidateSet('build', 'uninstall')][string]$Mode = 'build', [switch]$Recover)
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $owner = 'ibudaoa-oneclick-v1'
@@ -13,37 +13,210 @@ $previousConsoleOutput = [Console]::OutputEncoding
 $previousConsoleInput = [Console]::InputEncoding
 $previousOutputEncoding = $OutputEncoding
 
-function Assert-NoLink([string]$Path) {
-    $cursor = [IO.Path]::GetFullPath($Path)
-    while ($cursor) {
-        if (Test-Path -LiteralPath $cursor) {
-            if ((Get-Item -Force -LiteralPath $cursor).Attributes -band [IO.FileAttributes]::ReparsePoint) {
-                throw "路径不能经过符号链接或连接点：$cursor"
+function Initialize-Cleanup {
+    if (!('IbudaoaCleanup' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Text;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using Microsoft.Win32.SafeHandles;
+
+public static class IbudaoaCleanup {
+    static readonly bool Windows = Environment.OSVersion.Platform == PlatformID.Win32NT;
+    const uint Missing = 0xffffffff, Directory = 16, Reparse = 1024, ReadOnly = 1;
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct FindData {
+        public uint Attributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME Creation, Access, Write;
+        public uint SizeHigh, SizeLow, Reserved0, Reserved1;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string Name;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 14)] public string Alternate;
+    }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern uint GetFullPathNameW(string path, uint size, StringBuilder buffer, IntPtr last);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern uint GetFileAttributesW(string path);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern bool SetFileAttributesW(string path, uint attributes);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern IntPtr FindFirstFileW(string path, out FindData data);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern bool FindNextFileW(IntPtr handle, out FindData data);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool FindClose(IntPtr handle);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern bool DeleteFileW(string path);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern bool RemoveDirectoryW(string path);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+    static bool IsMissing(int error) { return error == 2 || error == 3; }
+    static IOException Error(string action, string path, int error) {
+        return new IOException(action + "：" + path + "（Windows 错误 " + error + "：" + new Win32Exception(error).Message + "）", new Win32Exception(error));
+    }
+    public static string FullPath(string path) {
+        if (String.IsNullOrWhiteSpace(path)) throw new IOException("路径为空");
+        if (!Windows) return Path.GetFullPath(path);
+        if (path.StartsWith(@"\\?\") || path.StartsWith(@"\\.\")) throw new IOException("不接受设备命名空间路径：" + path);
+        StringBuilder result = new StringBuilder(32768);
+        uint length = GetFullPathNameW(path, (uint)result.Capacity, result, IntPtr.Zero);
+        if (length == 0) throw Error("无法解析路径", path, Marshal.GetLastWin32Error());
+        if (length >= result.Capacity) throw new IOException("路径过长：" + path);
+        return result.ToString();
+    }
+    static string Extended(string full) {
+        if (!Windows) return full;
+        return full.StartsWith(@"\\") ? @"\\?\UNC\" + full.Substring(2) : @"\\?\" + full;
+    }
+    static uint? Attributes(string full) {
+        if (Windows) {
+            uint attributes = GetFileAttributesW(Extended(full));
+            if (attributes != Missing) return attributes;
+            int error = Marshal.GetLastWin32Error();
+            if (IsMissing(error)) return null;
+            throw Error("无法读取属性", full, error);
+        }
+        try { return (uint)File.GetAttributes(full); }
+        catch (FileNotFoundException) { return null; }
+        catch (DirectoryNotFoundException) { return null; }
+    }
+    public static bool Exists(string path) { return Attributes(FullPath(path)).HasValue; }
+    public static void AssertNoLinks(string path) {
+        string current = FullPath(path);
+        while (!String.IsNullOrEmpty(current)) {
+            uint? attributes = Attributes(current);
+            if (attributes.HasValue && (attributes.Value & Reparse) != 0)
+                throw new IOException("路径不能经过符号链接或连接点：" + current);
+            if (!Windows) { current = Path.GetDirectoryName(current); continue; }
+            current = current.TrimEnd('\\');
+            int cut = current.LastIndexOf('\\');
+            if (cut < 2) break;
+            // Do not query the server-only part of a UNC root.
+            if (current.StartsWith(@"\\") && current.IndexOf('\\', 2) == cut) break;
+            current = cut == 2 ? current.Substring(0, 3) : current.Substring(0, cut);
+            if (current.Length == 3 && current[1] == ':') {
+                attributes = Attributes(current);
+                if (attributes.HasValue && (attributes.Value & Reparse) != 0) throw new IOException("路径不能经过连接点：" + current);
+                break;
             }
         }
-        $cursor = [IO.Path]::GetDirectoryName($cursor)
     }
+    public static string[] Children(string path) {
+        string full = FullPath(path);
+        uint? attributes = Attributes(full);
+        if (!attributes.HasValue) return new string[0];
+        if ((attributes.Value & Reparse) != 0 || (attributes.Value & Directory) == 0)
+            throw new IOException("不能遍历链接或普通文件：" + full);
+        if (!Windows) {
+            try { return System.IO.Directory.GetFileSystemEntries(full); }
+            catch (DirectoryNotFoundException) { return new string[0]; }
+        }
+        FindData data;
+        IntPtr handle = FindFirstFileW(Extended(full).TrimEnd('\\') + @"\*", out data);
+        if (handle == new IntPtr(-1)) {
+            int error = Marshal.GetLastWin32Error();
+            if (IsMissing(error)) return new string[0];
+            throw Error("无法列出目录", full, error);
+        }
+        List<string> children = new List<string>();
+        try {
+            do {
+                if (data.Name != "." && data.Name != "..") children.Add(full.TrimEnd('\\') + "\\" + data.Name);
+            } while (FindNextFileW(handle, out data));
+            int error = Marshal.GetLastWin32Error();
+            if (error != 18) throw Error("读取目录失败", full, error);
+        } finally { FindClose(handle); }
+        return children.ToArray();
+    }
+    static void RemoveOne(string full, bool directory) {
+        if (Windows) {
+            bool removed = directory ? RemoveDirectoryW(Extended(full)) : DeleteFileW(Extended(full));
+            if (!removed) {
+                int error = Marshal.GetLastWin32Error();
+                if (!IsMissing(error)) throw Error("删除失败", full, error);
+            }
+        } else {
+            try { if (directory) System.IO.Directory.Delete(full); else File.Delete(full); }
+            catch (FileNotFoundException) { }
+            catch (DirectoryNotFoundException) { }
+        }
+    }
+    public static void RemoveEmptyDirectory(string path) { RemoveOne(FullPath(path), true); }
+    public static void RemoveDirectoryIfEmpty(string path) {
+        string full = FullPath(path);
+        if (Children(full).Length != 0) return;
+        if (Windows) {
+            if (!RemoveDirectoryW(Extended(full))) {
+                int error = Marshal.GetLastWin32Error();
+                if (!IsMissing(error) && error != 145 && error != 183) throw Error("删除空目录失败", full, error);
+            }
+        } else {
+            try { RemoveOne(full, true); }
+            catch (IOException) { if (Children(full).Length == 0) throw; }
+        }
+    }
+    public static void Delete(string path) {
+        string full = FullPath(path);
+        uint? attributes = Attributes(full);
+        if (!attributes.HasValue) return;
+        bool directory = (attributes.Value & Directory) != 0;
+        if ((attributes.Value & Reparse) != 0) { RemoveOne(full, directory); return; }
+        if (directory) {
+            foreach (string child in Children(full)) Delete(child);
+        } else if ((attributes.Value & ReadOnly) != 0) {
+            uint next = attributes.Value & ~ReadOnly;
+            if (next == 0) next = 128;
+            if (Windows) {
+                if (!SetFileAttributesW(Extended(full), next)) {
+                    int error = Marshal.GetLastWin32Error();
+                    if (IsMissing(error)) return;
+                    throw Error("无法清除只读属性", full, error);
+                }
+            } else {
+                try { File.SetAttributes(full, (FileAttributes)next); }
+                catch (FileNotFoundException) { return; }
+                catch (DirectoryNotFoundException) { return; }
+            }
+        }
+        RemoveOne(full, directory);
+    }
+    public static string Hash(string path) {
+        string full = FullPath(path);
+        AssertNoLinks(full);
+        if (Windows) {
+            // Opening the reparse point itself prevents following a replaced final link.
+            using (SafeFileHandle handle = CreateFileW(Extended(full), 0x80000000, 1, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero)) {
+                if (handle.IsInvalid) throw Error("无法读取文件", full, Marshal.GetLastWin32Error());
+                using (FileStream stream = new FileStream(handle, FileAccess.Read))
+                using (SHA256 sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+            }
+        }
+        using (FileStream stream = File.OpenRead(full))
+        using (SHA256 sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+    }
+}
+
+'@
+    }
+}
+function Assert-NoLink([string]$Path) {
+    Initialize-Cleanup
+    [IbudaoaCleanup]::AssertNoLinks($Path)
 }
 function Assert-Owned {
     Assert-NoLink $cache
     $marker = Join-Path $cache '.owner'
     Assert-NoLink $marker
     if (!(Test-Path -LiteralPath $marker) -or [IO.File]::ReadAllText($marker) -ne $owner) {
-        throw "目录不是本工具创建的，停止以保护原文件：$cache"
+        throw "管理目录标记缺失或不匹配，已停止：$cache。若是旧版卸载留下的残余，请使用 uninstall -Recover 并核对完整目录。"
     }
 }
 function Remove-OwnedTree([string]$Path) {
-    # Do not recurse through junctions, including on Windows PowerShell 5.1.
-    $item = Get-Item -Force -LiteralPath $Path
-    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-        if ($item.PSIsContainer) { [IO.Directory]::Delete($item.FullName) }
-        else { [IO.File]::Delete($item.FullName) }
-        return
-    }
-    if ($item.PSIsContainer) {
-        foreach ($child in Get-ChildItem -Force -LiteralPath $Path) { Remove-OwnedTree $child.FullName }
-        [IO.Directory]::Delete($item.FullName)
-    } else { Remove-Item -LiteralPath $Path -Force }
+    Initialize-Cleanup
+    [IbudaoaCleanup]::Delete($Path)
 }
 function Get-Download([string[]]$Urls, [string]$Destination, [string]$Sha256 = '', [int]$ConnectTimeoutMs = 15000, [int]$ReadTimeoutMs = 30000) {
     if ($Sha256 -and $Sha256 -notmatch '^[a-fA-F0-9]{64}$') { throw '下载清单校验值无效。' }
@@ -160,47 +333,103 @@ function Get-SourceSnapshot {
     throw '所有源码下载来源均失败。'
 }
 function Invoke-OfflineUninstall {
+    Initialize-Cleanup
+    $root = [IbudaoaCleanup]::FullPath($cache)
+    $expectedRoot = [IbudaoaCleanup]::FullPath((Join-Path $env:LOCALAPPDATA 'ibudaoa'))
+    if (!$root.Equals($expectedRoot, [StringComparison]::OrdinalIgnoreCase)) { throw '残留清理仅允许处理本账号固定的 ibudaoa 管理目录。' }
+    Assert-NoLink $root
     $config = Join-Path $cache 'config'
     Assert-NoLink $config
-    if (Test-Path -LiteralPath $config) {
-        $marker = Join-Path $config '.owner'
-        Assert-NoLink $marker
-        if (!(Test-Path -LiteralPath $marker -PathType Leaf) -or [IO.File]::ReadAllText($marker) -ne $owner) {
-            throw "不是本工具创建的配置目录：$config"
-        }
+    $configMarker = Join-Path $config '.owner'
+    Assert-NoLink $configMarker
+    $configTrusted = (Test-Path -LiteralPath $configMarker -PathType Leaf) -and [IO.File]::ReadAllText($configMarker) -eq $owner
+    if ([IbudaoaCleanup]::Exists($config) -and !$configTrusted -and !$Recover) {
+        throw "配置目录标记缺失或不匹配，已停止：$config。若是旧版卸载残余，请使用 uninstall -Recover。"
     }
-    Write-Host "将删除本工具保存的源码、工具、缓存、Key、签名及输出 APK。`n缓存目录：$cache`n配置目录：$config"
-    foreach ($record in @('output.path', 'output.sha256', 'output.created')) { Assert-NoLink (Join-Path $config $record) }
+    Write-Host "将删除本工具保存的源码、工具、缓存、Key、签名及输出 APK。`n缓存目录：$root`n配置目录：$config"
     $output = $null
+    $apk = $null
+    $expectedHash = $null
+    $removeOutputFolder = $false
+    foreach ($record in @('output.path', 'output.sha256', 'output.created')) { Assert-NoLink (Join-Path $config $record) }
     $record = Join-Path $config 'output.path'
+    $fingerprint = Join-Path $config 'output.sha256'
     if (Test-Path -LiteralPath $record -PathType Leaf) {
-        $output = [IO.File]::ReadAllText($record)
-        if (![IO.Path]::IsPathRooted($output)) { throw '输出路径无效。' }
-        Assert-NoLink $output
-        Write-Host "输出 APK：$(Join-Path $output 'ibudaoa.apk')"
-    }
-    Write-Host "删除签名后，将无法用新签名覆盖升级原来安装的应用。`n如需保留升级能力，请先备份整个配置目录：$config"
-    $answer = Read-Host '确认全部删除？[y/N]'
-    if (!$answer -or $answer.Trim() -ine 'y') { Write-Host '已取消，未删除文件。'; return }
-    if ($output) {
-        $apk = Join-Path $output 'ibudaoa.apk'
-        Assert-NoLink $apk
-        if (Test-Path -LiteralPath $apk) {
-            $fingerprint = Join-Path $config 'output.sha256'
-            if (!(Test-Path -LiteralPath $fingerprint -PathType Leaf) -or
-                (Get-FileHash -Algorithm SHA256 -LiteralPath $apk).Hash -ine [IO.File]::ReadAllText($fingerprint)) {
-                throw "输出 APK 已被替换，保留该文件并停止清理：$apk"
+        $recordedOutput = [IO.File]::ReadAllText($record)
+        if ($Recover -and (!$configTrusted -or !(Test-Path -LiteralPath $fingerprint -PathType Leaf))) {
+            Write-Host "输出记录不完整或缺少配置标记，管理目录外的 APK 不会删除。记录位置：$recordedOutput"
+        } else {
+            if (![IO.Path]::IsPathRooted($recordedOutput)) { throw '输出路径无效。' }
+            $output = [IbudaoaCleanup]::FullPath($recordedOutput)
+            Assert-NoLink $output
+            $apk = Join-Path $output 'ibudaoa.apk'
+            Assert-NoLink $apk
+            if ([IbudaoaCleanup]::Exists($apk)) {
+                if (Test-Path -LiteralPath $fingerprint -PathType Leaf) { $expectedHash = [IO.File]::ReadAllText($fingerprint) }
+                if (!$expectedHash -or $expectedHash -notmatch '^[a-fA-F0-9]{64}$') {
+                    if ($Recover) {
+                        Write-Host "输出指纹缺失或无效，管理目录外的 APK 不会删除：$apk"
+                        $apk = $null; $output = $null
+                    } else { throw "输出 APK 缺少有效指纹，保留全部文件并停止清理：$apk" }
+                } elseif ([IbudaoaCleanup]::Hash($apk) -ine $expectedHash) {
+                    throw "输出 APK 已被替换，保留全部文件并停止清理：$apk"
+                }
             }
-            Remove-Item -LiteralPath $apk
+            if ($output) {
+                Write-Host "输出 APK：$(Join-Path $output 'ibudaoa.apk')"
+                $created = Join-Path $config 'output.created'
+                $removeOutputFolder = (Test-Path -LiteralPath $created -PathType Leaf) -and [IO.File]::ReadAllText($created) -eq $output
+            }
         }
-        $created = Join-Path $config 'output.created'
-        if ((Test-Path -LiteralPath $created -PathType Leaf) -and [IO.File]::ReadAllText($created) -eq $output -and
-            (Test-Path -LiteralPath $output -PathType Container) -and @(Get-ChildItem -Force -LiteralPath $output).Count -eq 0) {
-            [IO.Directory]::Delete($output)
-        }
+    } elseif ($Recover) { Write-Host '没有完整的输出路径记录，管理目录外的 APK 不会删除。' }
+    Write-Host "删除签名后，将无法用新签名覆盖升级原来安装的应用。`n如需保留升级能力，请先备份整个配置目录：$config"
+    if ($Recover) {
+        Write-Host '残留清理无法恢复此前已删除的签名或配置。请核对上面的完整管理目录。'
+        $answer = Read-Host '确认清理请输入上面的完整缓存目录；直接回车取消'
+        if (!$answer -or !$answer.Trim().Equals($root, [StringComparison]::OrdinalIgnoreCase)) { Write-Host '已取消，未删除文件。'; return }
+    } else {
+        $answer = Read-Host '确认全部删除？[y/N]'
+        if (!$answer -or $answer.Trim() -ine 'y') { Write-Host '已取消，未删除文件。'; return }
     }
-    Assert-Owned
-    Remove-OwnedTree $cache
+    # Keep identity, configuration, and the local retry entry until disposable files are gone.
+    foreach ($child in [IbudaoaCleanup]::Children($cache)) {
+        $name = [IO.Path]::GetFileName($child)
+        if ($name -in @('.owner', 'config', 'uninstall.ps1')) { continue }
+        $stageName = switch ($name) {
+            'gradle' { 'Gradle 缓存' }
+            'work' { '源码' }
+            'tools' { '构建工具' }
+            'bootstrap' { '下载临时文件' }
+            default { $name }
+        }
+        $script:stage = "清理 $stageName"
+        Remove-OwnedTree $child
+    }
+    $script:stage = '清理输出 APK'
+    if ($apk -and [IbudaoaCleanup]::Exists($apk)) {
+        Assert-NoLink $apk
+        # Recheck after cache cleanup in case another application replaced the APK.
+        if (!$expectedHash -or [IbudaoaCleanup]::Hash($apk) -ine $expectedHash) { throw "输出 APK 已被替换，保留该文件及配置：$apk" }
+        Remove-OwnedTree $apk
+    }
+    if ($output -and $removeOutputFolder -and [IbudaoaCleanup]::Exists($output)) {
+        Assert-NoLink $output
+        [IbudaoaCleanup]::RemoveDirectoryIfEmpty($output)
+    }
+    $script:stage = '清理配置与签名'
+    Assert-NoLink $config
+    if ([IbudaoaCleanup]::Exists($config)) {
+        foreach ($child in [IbudaoaCleanup]::Children($config)) {
+            if ([IO.Path]::GetFileName($child) -ne '.owner') { Remove-OwnedTree $child }
+        }
+        Remove-OwnedTree $configMarker
+        [IbudaoaCleanup]::RemoveEmptyDirectory($config)
+    }
+    $script:stage = '清理卸载入口与标记'
+    Assert-NoLink $cache
+    Remove-OwnedTree (Join-Path $cache 'uninstall.ps1')
+    Remove-OwnedTree (Join-Path $cache '.owner')
+    [IbudaoaCleanup]::RemoveEmptyDirectory($cache)
     Write-Host '清理完成。'
 }
 function Test-Jdk([string]$Java) {
@@ -254,6 +483,7 @@ try {
     [Console]::OutputEncoding = $utf8
     [Console]::InputEncoding = $utf8
     $OutputEncoding = $utf8
+    if ($Recover -and $Mode -ne 'uninstall') { throw '-Recover 只能用于 uninstall 模式。' }
     if ($env:OS -ne 'Windows_NT' -or [Environment]::Is64BitOperatingSystem -eq $false -or
         $env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw '此入口支持 Windows x64，请在 64 位 PowerShell 中运行。' }
     $hasher = [Security.Cryptography.SHA256]::Create()
@@ -268,17 +498,23 @@ try {
     if (!$locked) { throw '另一个构建或清理正在运行，请等待结束后重试。' }
     Assert-NoOtherWorker
     Remove-LegacyLock
-    if ($Mode -eq 'uninstall' -and !(Test-Path -LiteralPath $cache)) {
+    if ($Mode -eq 'uninstall') { $stage = '清理'; Initialize-Cleanup }
+    if ($Mode -eq 'uninstall' -and ![IbudaoaCleanup]::Exists($cache)) {
         Write-Host '没有需要清理的构建文件。'
         return
     }
     Assert-NoLink $cache
+    if ($Mode -eq 'uninstall') {
+        $stage = '清理'
+        if (!$Recover) { Assert-Owned }
+        Invoke-OfflineUninstall
+        return
+    }
     if (Test-Path -LiteralPath $cache) { Assert-Owned }
     else {
         New-Item -ItemType Directory -Path $cache | Out-Null
         [IO.File]::WriteAllText((Join-Path $cache '.owner'), $owner)
     }
-    if ($Mode -eq 'uninstall') { Invoke-OfflineUninstall; return }
     # Persist the complete local entry before downloads, so uninstall is always offline.
     $localUninstall = Join-Path $cache 'uninstall.ps1'
     Assert-NoLink $localUninstall
@@ -322,7 +558,7 @@ try {
             $roots = @(Get-ChildItem -Directory -LiteralPath $unpack)
             if ($roots.Count -ne 1 -or !(Test-Jdk (Join-Path $roots[0].FullName 'bin\java.exe'))) { throw 'Java 压缩包内容异常。' }
             New-Item -ItemType Directory -Force -Path (Split-Path $jdk) | Out-Null
-            if (Test-Path -LiteralPath $jdk) { Remove-Item -LiteralPath $jdk -Recurse -Force }
+            if (Test-Path -LiteralPath $jdk) { Remove-OwnedTree $jdk }
             Move-Item -LiteralPath $roots[0].FullName -Destination $jdk
         }
     }
@@ -335,11 +571,16 @@ try {
 
 } catch {
     Write-Host "失败阶段：$stage。$($_.Exception.Message)" -ForegroundColor Red
-    Write-Host '请处理上述问题后重新执行同一命令；中断后无需手动删除锁文件。' -ForegroundColor Red
+    if ($Mode -eq 'uninstall') {
+        Write-Host ('处理上述问题后可重试：powershell -NoProfile -ExecutionPolicy Bypass -File "' + $PSCommandPath + '" uninstall' + $(if ($Recover) { ' -Recover' } else { '' })) -ForegroundColor Red
+    } else { Write-Host '请处理上述问题后重新执行同一命令；中断后无需手动删除锁文件。' -ForegroundColor Red }
     $exitCode = 1
 } finally {
     try {
-        if ($scratch -and (Test-Path -LiteralPath $scratch)) { Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction Continue }
+        if ($scratch) {
+            try { Remove-OwnedTree $scratch }
+            catch { Write-Host "临时文件清理失败：$($_.Exception.Message)" -ForegroundColor Red; $exitCode = 1 }
+        }
     } finally {
         if ($locked) { $mutex.ReleaseMutex() }
         if ($mutex) { $mutex.Dispose() }

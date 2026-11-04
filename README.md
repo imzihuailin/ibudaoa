@@ -84,6 +84,22 @@ bash "$HOME/.cache/ibudaoa/uninstall.sh" uninstall
 
 输入 `y` 确认全部删除；直接回车或输入 `N` 取消。输出文件夹中的其他文件会保留；APK 被替换时停止清理并提示。清理失败会显示残留位置，可处理后重试。不会删除自行备份或复制到其他位置的文件，也不清除终端历史等系统记录。
 
+Windows 卸载按“缓存和工具 → 输出 APK → 配置与签名 → 卸载入口和标记”的顺序清理。文件地址超过260字符时使用原生长路径接口；缓存清理失败会保留尚存的签名、Key 和卸载入口，处理占用或权限问题后可直接重试。
+
+如果旧版卸载已报错，请先单独下载修正版 [oneclick.ps1](https://ghfast.top/https://raw.githubusercontent.com/imzihuailin/ibudaoa/HEAD/scripts/oneclick.ps1)，保存到下载文件夹等管理目录以外的位置。在保存文件的目录打开 PowerShell，直接运行卸载，无需先运行安装：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\oneclick.ps1" uninstall
+```
+
+若提示管理目录或配置标记缺失，改用残留清理模式：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\oneclick.ps1" uninstall -Recover
+```
+
+残留清理仅处理当前账号的 `%LOCALAPPDATA%\ibudaoa`，需要输入屏幕显示的完整缓存目录确认，输入 `y` 或直接回车均取消。配置标记、输出路径或 APK 指纹缺失时，不删除管理目录外的 APK。恢复模式不能找回旧版已经删除的签名或配置。
+
 已下载的源码入口也可直接执行 `bash scripts/oneclick.sh uninstall` 或 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/oneclick.ps1 uninstall`，两者均无需联网。
 
 ## 手动源码构建（开发者）
