@@ -25,6 +25,8 @@ bash -c 'set -e; p=$(mktemp); trap '\''rm -f "$p"'\'' EXIT; u=https://raw.github
 ```
 
 脚本展示包名和 SHA-1 后，去[高德控制台](https://console.amap.com/dev/key/app)，添加 Key 将 SHA-1 填入发布安全码SHA1 ，并提交创建 Key （其他的按图片里填），在终端按回车继续。
+<img width="1890" height="1137" alt="image" src="https://github.com/user-attachments/assets/c4c011bb-ae4b-4bd8-be31-c43929347c40" />
+
 
 ### 文件位置
 
