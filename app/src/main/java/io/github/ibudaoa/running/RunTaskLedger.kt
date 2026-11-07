@@ -3,6 +3,9 @@ package io.github.ibudaoa.running
 import kotlinx.serialization.json.*
 import java.util.UUID
 
+internal class RunJournalInvalid : IllegalStateException("Saved task is damaged")
+internal enum class RunRecoveryAction { VERIFY, RESTORE_PAUSED, DISCARD_LOCAL }
+
 internal enum class RunWrite { SELECT_ZONE, REGISTER, LOCATION, FINISH, GYROSCOPE }
 enum class RunTaskPhase { PREPARED, ZONE_SELECTED, RUNNING, PAUSED, INTERRUPTED, WRITE_UNCERTAIN, AWAITING_VERDICT, VALID, INVALID }
 data class RunTaskSummary(val phase:RunTaskPhase,val writePending:Boolean,val needsReconciliation:Boolean,
@@ -33,12 +36,20 @@ internal class RunTaskLedger private constructor(private val journal:RunTaskJour
             number("record")!=null,phase==RunTaskPhase.VALID || phase==RunTaskPhase.INVALID)
     }
     private fun save(changes:Map<String,JsonElement?>) {
+        check(!closed) { "Task already closed" }
         val next=checkpoint.toMutableMap()
         changes.forEach { (k,v) -> if(v==null) next.remove(k) else next[k]=v }
         val result=JsonObject(next)
         val bytes=result.toString().toByteArray()
         try { journal.save(bytes) } catch(e:Exception) { storageFailed=true;throw e } finally { bytes.fill(0) }
         checkpoint=result;storageFailed=false
+    }
+    /** Local inspection requires no credentials and never grants a network write. */
+    @Synchronized fun recoveryAction():RunRecoveryAction = when {
+        summary.recordBound || pendingWrite()==RunWrite.FINISH -> RunRecoveryAction.VERIFY
+        !summary.platformStarted || summary.writePending || summary.needsReconciliation ||
+            (execution()?.get("timeline") as? JsonObject)?.get("samples")?.let { it as? JsonArray }?.isNotEmpty()!=true -> RunRecoveryAction.DISCARD_LOCAL
+        else -> RunRecoveryAction.RESTORE_PAUSED
     }
     @Synchronized fun saveExecution(value:JsonObject) { save(mapOf("execution" to value)) }
     @Synchronized fun execution():JsonObject? = checkpoint["execution"] as? JsonObject
@@ -61,7 +72,7 @@ internal class RunTaskLedger private constructor(private val journal:RunTaskJour
         save(mapOf("pending" to JsonPrimitive(operation.name),"sequence" to JsonPrimitive(seq)))
         return RunWritePermit(seq,operation).also { permit=it }
     }
-    private fun owns(value:RunWritePermit)=permit===value && number("sequence")==value.sequence && text("pending")==value.operation.name
+    private fun owns(value:RunWritePermit)=!closed && permit===value && number("sequence")==value.sequence && text("pending")==value.operation.name
     @Synchronized fun accept(value:RunWritePermit,response:ByteArray):Boolean {
         if(!owns(value)) return false
         val changes=mutableMapOf<String,JsonElement?>("pending" to null)
@@ -250,12 +261,14 @@ internal class RunTaskLedger private constructor(private val journal:RunTaskJour
             ledger.save(emptyMap())
             return ledger
         }
-        fun restore(journal:RunTaskJournal,account:Long):RunTaskLedger? {
+        fun restore(journal:RunTaskJournal,account:Long):RunTaskLedger? = restoreValidated(journal,account)
+        fun restoreLocal(journal:RunTaskJournal):RunTaskLedger? = restoreValidated(journal,null)
+        private fun restoreValidated(journal:RunTaskJournal,account:Long?):RunTaskLedger? {
             val bytes=journal.load() ?: return null
             val checkpoint=try {
                 require(bytes.size in 1..RunTaskJournalCipher.MAX_BYTES)
                 val o=Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)) as JsonObject
-                require(account>0 && o["account"]?.jsonPrimitive?.longOrNull==account) { "Run checkpoint belongs to a different account" }
+                require(account==null || account>0 && o["account"]?.jsonPrimitive?.longOrNull==account) { "Run checkpoint belongs to a different account" }
                 require(o["schema"]?.jsonPrimitive?.intOrNull==1)
                 require(o["task"]?.jsonPrimitive?.content?.let { UUID.fromString(it).toString()==it }==true)
                 val phase=RunTaskPhase.valueOf(o.getValue("phase").jsonPrimitive.content)
@@ -272,7 +285,7 @@ internal class RunTaskLedger private constructor(private val journal:RunTaskJour
                 if(phase in setOf(RunTaskPhase.AWAITING_VERDICT,RunTaskPhase.VALID,RunTaskPhase.INVALID))
                     require(o["record"]?.jsonPrimitive?.longOrNull?.let { it>0 }==true)
                 o
-            } finally { bytes.fill(0) }
+            } catch(_:Exception) { throw RunJournalInvalid() } finally { bytes.fill(0) }
             val ledger=RunTaskLedger(journal,checkpoint)
             ledger.foreground=false
             if(ledger.text("pending")!=null) ledger.save(mapOf("phase" to JsonPrimitive(RunTaskPhase.WRITE_UNCERTAIN.name)))

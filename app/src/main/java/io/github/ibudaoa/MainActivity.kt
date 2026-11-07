@@ -189,6 +189,7 @@ class MainActivity : ComponentActivity() {
                             onAutomaticAction = { model.automaticAction(lifecycle) },
                             onFinishAutomatic = model::finishAutomatic,
                             onAutomaticComplete = model::completeAutomatic,
+                            onClearDamagedAutomatic = model::clearDamagedAutomatic,
                             onDismissAutomaticNotice = model::dismissAutomaticNotice,
                             onArchiveConfirmedAutomatic = model::archiveConfirmedAutomatic,
                             onDiscardUnconfirmedAutomatic = model::discardUnconfirmedAutomatic,

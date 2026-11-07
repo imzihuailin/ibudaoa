@@ -237,21 +237,26 @@ class CaptureVpnService : VpnService() {
         }
         if (!captured.compareAndSet(false,true) || destroyed) return
         try {
+            var schoolSaved=true
             runBlocking(scope.coroutineContext) {
-                if (!destroyed) DiagnosticStore(this@CaptureVpnService).save(school,captured=true)
+                if (!destroyed) {
+                    val store=DiagnosticStore(this@CaptureVpnService)
+                    if(purpose==CapturePurpose.ACCOUNT_SESSION)schoolSaved=store.saveCapturedAccountSchool(school)
+                    else store.save(school,captured=true)
+                }
             }
             if (!destroyed) {
                 CaptureRuntime.update(generation) { it.copy(config=school) }
-                completeSuccessfully()
+                completeSuccessfully(schoolSaved)
             }
         } catch (_: CancellationException) { /* Explicit cancellation fences pending saves. */ }
         catch (_: Exception) { fail(CaptureProblem.STORAGE) }
     }
 
-    private fun completeSuccessfully() {
+    private fun completeSuccessfully(schoolSaved:Boolean=true) {
         if (destroyed) return
         CaptureRuntime.update(generation) { it.copy(phase=CapturePhase.CAPTURED,problem=CaptureProblem.NONE,
-            message="账号和学校资料已保存，正在返回。") }
+            message=if(schoolSaved) "账号和学校资料已保存，正在返回。" else "账号已连接，原任务和学校配置已保留，正在返回。") }
         handler.post {
             if (!destroyed && CaptureRuntime.state.value.generation == generation &&
                 CaptureRuntime.state.value.phase == CapturePhase.CAPTURED) {

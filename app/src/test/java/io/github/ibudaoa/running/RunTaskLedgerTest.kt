@@ -2,6 +2,7 @@ package io.github.ibudaoa.running
 
 import org.junit.Assert.*
 import org.junit.Test
+import kotlinx.serialization.json.jsonObject
 
 class RunTaskLedgerTest {
     private class Journal:RunTaskJournal {
@@ -10,6 +11,86 @@ class RunTaskLedgerTest {
         override fun archiveResolved(bytes:ByteArray) { if(fail) error("synthetic archive failure"); archived=bytes.clone() }
         override fun clear() { if(fail)error("synthetic removal failure");bytes?.fill(0);bytes=null }
         override fun save(bytes:ByteArray) { if(fail)error("synthetic storage failure");this.bytes=bytes.clone();saves++ }
+    }
+    @Test fun `local recovery classifies startup and unknown writes without an account session`() {
+        val journal=Journal()
+        task(journal)
+        fun restored()=RunTaskLedger.restoreLocal(journal)!!.also { it.foreground() }
+        assertEquals(RunRecoveryAction.DISCARD_LOCAL,restored().recoveryAction())
+        journal.clear()
+        val startup=task(journal)
+        startup.saveExecution(kotlinx.serialization.json.Json.parseToJsonElement("""{"timeline":{"samples":[]}}""").jsonObject)
+        startup.begin(RunWrite.SELECT_ZONE)
+        assertEquals(RunRecoveryAction.DISCARD_LOCAL,restored().recoveryAction())
+        journal.clear()
+        val active=running(journal)
+        active.saveExecution(kotlinx.serialization.json.Json.parseToJsonElement("""{"timeline":{"samples":[[]]}}""").jsonObject)
+        assertEquals(RunRecoveryAction.RESTORE_PAUSED,restored().recoveryAction())
+        active.begin(RunWrite.LOCATION)
+        assertEquals(RunRecoveryAction.DISCARD_LOCAL,restored().recoveryAction())
+        journal.clear()
+        val finishTask=running(journal)
+        finishTask.begin(RunWrite.FINISH)
+        assertEquals(RunRecoveryAction.VERIFY,restored().recoveryAction())
+        journal.clear()
+        val bound=running(journal)
+        assertTrue(bound.accept(bound.begin(RunWrite.FINISH),finish))
+        assertEquals(RunRecoveryAction.VERIFY,restored().recoveryAction())
+    }
+    @Test fun `empty startup snapshot never restores a fabricated paused run`() {
+        val journal=Journal();val ledger=running(journal)
+        ledger.saveExecution(kotlinx.serialization.json.Json.parseToJsonElement("""{"timeline":{"samples":[]}}""").jsonObject)
+        assertEquals(RunRecoveryAction.DISCARD_LOCAL,RunTaskLedger.restoreLocal(journal)!!.recoveryAction())
+    }
+    @Test fun `local cleanup retains checkpoint when lock release fails and supports retry`() = kotlinx.coroutines.runBlocking {
+        val journal=Journal();val ledger=task(journal)
+        var unlocked=false
+        try { discardInterruptedLocal(ledger) { error("Synthetic lock failure") };fail("must fail") }
+        catch(_:IllegalStateException) { }
+        assertNotNull(journal.bytes)
+        discardInterruptedLocal(ledger) { unlocked=true }
+        assertTrue(unlocked);assertNull(journal.bytes)
+    }
+    @Test fun `journal removal failure keeps task retryable after lock release`() = kotlinx.coroutines.runBlocking {
+        val journal=Journal();val ledger=task(journal);journal.fail=true
+        var releases=0
+        try { discardInterruptedLocal(ledger) { releases++ };fail("must fail") }
+        catch(_:IllegalStateException) { }
+        assertNotNull(journal.bytes);assertTrue(ledger.canDiscardUnverifiable())
+        journal.fail=false
+        discardInterruptedLocal(ledger) { releases++ }
+        assertEquals(2,releases);assertNull(journal.bytes)
+    }
+    @Test fun `late response cannot resurrect a discarded local task`() = kotlinx.coroutines.runBlocking {
+        val journal=Journal();val ledger=task(journal)
+        val permit=ledger.begin(RunWrite.SELECT_ZONE)
+        ledger.uncertain(permit)
+        discardInterruptedLocal(ledger) { }
+        assertFalse(ledger.accept(permit,ok))
+        ledger.uncertain(permit)
+        assertTrue(runCatching { ledger.saveExecution(kotlinx.serialization.json.buildJsonObject { }) }.isFailure)
+        assertNull(journal.bytes)
+        assertTrue(runCatching { ledger.begin(RunWrite.SELECT_ZONE) }.isFailure)
+    }
+    @Test fun `finish unknown cannot enter automatic local cleanup`() = kotlinx.coroutines.runBlocking {
+        val journal=Journal();val ledger=running(journal)
+        ledger.uncertain(ledger.begin(RunWrite.FINISH))
+        var released=false
+        try { discardInterruptedLocal(ledger) { released=true };fail("must retain finish") }
+        catch(_:IllegalStateException) { }
+        assertFalse(released);assertNotNull(journal.bytes)
+    }
+    @Test fun `invalid checkpoint is distinct from a storage access failure`() {
+        val journal=Journal();journal.bytes="{}".toByteArray()
+        assertTrue(runCatching { RunTaskLedger.restoreLocal(journal) }.exceptionOrNull() is RunJournalInvalid)
+        val broken=object:RunTaskJournal {
+            override fun load():ByteArray? = error("Synthetic IO failure")
+            override fun save(bytes:ByteArray) { error("unexpected save") }
+            override fun clear() { error("unexpected clear") }
+            override fun archiveResolved(bytes:ByteArray) { error("unexpected archive") }
+        }
+        assertFalse(runCatching { RunTaskLedger.restoreLocal(broken) }.exceptionOrNull() is RunJournalInvalid)
+        assertNotNull(journal.bytes)
     }
     private fun task(journal:Journal)=RunTaskLedger.create(journal,123,4,5,6,listOf("a","b"))
     private val ok="""{"status":1,"data":{}}""".toByteArray()

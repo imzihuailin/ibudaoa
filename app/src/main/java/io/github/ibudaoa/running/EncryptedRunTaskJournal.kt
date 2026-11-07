@@ -33,7 +33,7 @@ internal object RunTaskJournalCipher {
             val cipher=Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.DECRYPT_MODE,key,GCMParameterSpec(128,iv));cipher.updateAAD(aad)
             return cipher.doFinal(sealed,16,sealed.size-16)
-        } catch(_:Exception) { throw IllegalStateException("Run checkpoint cannot be recovered") }
+        } catch(_:Exception) { throw RunJournalInvalid() }
     }
 }
 internal class AndroidRunTaskJournal(private val context:Context):RunTaskJournal {
@@ -41,7 +41,7 @@ internal class AndroidRunTaskJournal(private val context:Context):RunTaskJournal
     private fun key(create:Boolean):SecretKey {
         val store=KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (store.getKey(ALIAS,null) as? SecretKey)?.let { return it }
-        check(create) { "Run checkpoint key unavailable" }
+        if(!create)throw RunJournalInvalid()
         return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES,"AndroidKeyStore").apply {
             init(KeyGenParameterSpec.Builder(ALIAS,KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
                 .setKeySize(256).setBlockModes(KeyProperties.BLOCK_MODE_GCM)
@@ -59,7 +59,7 @@ internal class AndroidRunTaskJournal(private val context:Context):RunTaskJournal
                     if(count<0) break
                     offset+=count
                 }
-                check(offset<=RunTaskJournalCipher.MAX_BYTES+32) { "Run checkpoint too large" }
+                if(offset>RunTaskJournalCipher.MAX_BYTES+32)throw RunJournalInvalid()
                 buffer.copyOf(offset)
             } finally { buffer.fill(0) }
         }

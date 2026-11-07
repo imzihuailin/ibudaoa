@@ -278,6 +278,23 @@ class DiagnosticStoreTest {
         assertTrue(runCatching { store.savePointCache(cache(imported.connectionEpoch)) }.isFailure)
     }
 
+    @Test fun `account reconnect preserves locked task configuration and selected points`() = runBlocking {
+        val store=DiagnosticStore(MemoryStore());store.save(config(),captured=true)
+        val before=store.pointPlanningStorage.first()
+        val draft=cache(before.connectionEpoch)
+        store.savePointCache(draft)
+        val locked=draft.lockForExecution()
+        store.savePointCache(locked)
+        assertFalse(store.saveCapturedAccountSchool(config(zone=4)))
+        val after=store.pointPlanningStorage.first()
+        assertEquals(before.config,after.config)
+        assertEquals(before.connectionEpoch,after.connectionEpoch)
+        assertEquals(locked,after.cache)
+        store.releaseResolvedPointCache(locked)
+        assertTrue(store.saveCapturedAccountSchool(config(zone=4)))
+        assertEquals(config(zone=4),store.pointPlanningStorage.first().config)
+    }
+
     @Test fun `locked points cannot be overwritten cleared or discarded by reconnect`() = runBlocking {
         val store = DiagnosticStore(MemoryStore()); store.save(config(), captured = true)
         val draft = cache(store.pointPlanningStorage.first().connectionEpoch)

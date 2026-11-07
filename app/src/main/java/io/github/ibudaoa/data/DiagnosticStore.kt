@@ -107,6 +107,8 @@ class DiagnosticStore internal constructor(private val store: DataStore<Preferen
     suspend fun save(config: DiagnosticConfig, captured: Boolean = false) {
         persist(config,captured,null)
     }
+    /** Reconnecting a login must not replace school data or unlock a retained run. */
+    internal suspend fun saveCapturedAccountSchool(config:DiagnosticConfig):Boolean = persist(config,true,null,keepLockedTask=true)
     private class OnlineRefresh(val expected:DiagnosticConfig,val epoch:Long,val current:()->Boolean)
     internal suspend fun refreshVerified(config:DiagnosticConfig,expected:DiagnosticConfig,epoch:Long,current:()->Boolean): PointPlanningStorage {
         persist(config,true,OnlineRefresh(expected,epoch,current))
@@ -115,9 +117,11 @@ class DiagnosticStore internal constructor(private val store: DataStore<Preferen
             committed.connectionEpoch == nextEpoch(epoch)) { "在线配置或账号状态已变化，停止准备" }
         return committed
     }
-    private suspend fun persist(config:DiagnosticConfig,captured:Boolean,online:OnlineRefresh?) {
+    private suspend fun persist(config:DiagnosticConfig,captured:Boolean,online:OnlineRefresh?,keepLockedTask:Boolean=false):Boolean {
+        var saved=false
         // The raw input never reaches disk; persist only the allowlisted export.
         store.edit {
+            if(keepLockedTask && it[pointCacheKey]?.let(PointCacheCodec::decode)?.locked==true)return@edit
             requireUnlocked(it)
             val previous = it[configKey]?.let { saved -> runCatching { DiagnosticCodec.decode(saved) }.getOrNull() }
             if(online!=null) {
@@ -188,7 +192,9 @@ class DiagnosticStore internal constructor(private val store: DataStore<Preferen
             }
             it.remove(pointCacheKey)
             if(online!=null) check(online.current()) { "在线配置或账号状态已变化，原数据已保留" }
+            saved=true
         }
+        return saved
     }
 
     private fun Preferences.readRoadReport(config: DiagnosticConfig?): RoadBatchReport? {

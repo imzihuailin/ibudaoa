@@ -10,6 +10,17 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 class RunRecordReaderTest {
+    @Test fun `reconnecting another account cannot send a query for a retained task`()=runBlocking {
+        val session=RunProtocolFixture.session()
+        val context=io.github.ibudaoa.running.RunRequestContext(43,1,2,3,listOf("21","22"),1700000000,"a".repeat(32))
+        var sent=false;var closed=false
+        val reader=RunRecordReader(session,{Instant.ofEpochSecond(RunProtocolFixture.now)},{object:AccountReadConnection {
+            override fun send(request:LocalRequest):ByteArray { sent=true;error("must not send") }
+            override fun close() { closed=true }
+        }})
+        assertTrue(runCatching { reader.record(context,ExpectedRunRecord(99,43,3,1700000000)) }.isFailure)
+        assertFalse(sent);assertTrue(closed)
+    }
     @Test fun `verification cancellation closes a blocked read and permits a later query`()=runBlocking {
         val entered=CountDownLatch(1)
         val closed=CountDownLatch(1)

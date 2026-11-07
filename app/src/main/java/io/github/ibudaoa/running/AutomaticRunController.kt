@@ -16,6 +16,7 @@ internal class AutomaticRunController(val ledger:RunTaskLedger,val timeline:Auto
     private val preparationCurrent:()->Boolean,private val clock:()->Long) {
     @Volatile private var foreground=true
     @Volatile private var starting=false
+    @Volatile private var startCancelled=false
     var persist:()->Unit = {}
     private val operations=Mutex()
     private var lastUpload=-1L
@@ -62,15 +63,15 @@ internal class AutomaticRunController(val ledger:RunTaskLedger,val timeline:Auto
         } finally { operations.unlock() }
     }
     private suspend fun startLocked():Boolean {
-        if(!foreground || starting || ledger.summary.phase!=RunTaskPhase.PREPARED || !bound() || !preparationCurrent())return false
+        if(startCancelled || !foreground || starting || ledger.summary.phase!=RunTaskPhase.PREPARED || !bound() || !preparationCurrent())return false
         gateway.preparationProblem()?.let { problem=it;return false }
         starting=true
         try {
             if(!send(RunWrite.SELECT_ZONE))return false
-            if(!foreground || !bound() || !preparationCurrent()) { problem="PREPARATION_CHANGED";interrupt();return false }
+            if(startCancelled || !foreground || !bound() || !preparationCurrent()) { problem="PREPARATION_CHANGED";interrupt();return false }
             if(!send(RunWrite.REGISTER))return false
             synchronized(this) {
-                if(!foreground || !bound() || ledger.summary.phase!=RunTaskPhase.RUNNING)return false
+                if(startCancelled || !foreground || !bound() || ledger.summary.phase!=RunTaskPhase.RUNNING)return false
                 if(!gateway.registrationTimeAccepted(ledger.requestContext().registeredStart!!)) {
                     problem="REGISTRATION_TIME_MISMATCH";interrupt();return false
                 }
@@ -102,7 +103,12 @@ internal class AutomaticRunController(val ledger:RunTaskLedger,val timeline:Auto
     }
     @Synchronized fun pause() {
         if(!foreground || finishing)return
-        desiredPause=true;timeline.pause(clock())
+        desiredPause=true
+        if(timeline.phase==AutomaticRunPhase.IDLE) {
+            startCancelled=true;problem="START_CANCELLED"
+            return
+        }
+        timeline.pause(clock())
         if(ledger.summary.phase==RunTaskPhase.RUNNING && !ledger.summary.writePending)ledger.pause()
         if(timeline.phase==AutomaticRunPhase.PAUSED)updateRuleProblems()
     }

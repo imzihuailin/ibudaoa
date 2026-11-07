@@ -166,6 +166,7 @@ fun IbudaoaApp(
     onAutomaticAction: () -> Unit,
     onFinishAutomatic: () -> Unit,
     onAutomaticComplete: () -> Unit,
+    onClearDamagedAutomatic: () -> Unit,
     onDismissAutomaticNotice: () -> Unit,
     onDiscardUnconfirmedAutomatic: () -> Unit,
     onArchiveConfirmedAutomatic: () -> Unit,
@@ -183,6 +184,7 @@ fun IbudaoaApp(
     val batteryPassed = state.batteryUnrestricted || skippedBattery
     var handledWarmupReason by rememberSaveable { mutableStateOf<String?>(null) }
     var showSummary by rememberSaveable { mutableStateOf(false) }
+    var confirmDamagedTask by rememberSaveable { mutableStateOf(false) }
     var confirmClear by rememberSaveable { mutableStateOf(false) }
     var showGapCheck by rememberSaveable { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
@@ -250,6 +252,14 @@ fun IbudaoaApp(
         }
     }
 
+    if(confirmDamagedTask) {
+        AlertDialog(onDismissRequest={ confirmDamagedTask=false },
+            title={ Text("清除损坏的本地任务？") },
+            text={ Text("清除后无法恢复本次本地进度。不会修改平台记录；如曾提交，请去步道乐跑确认结果。") },
+            confirmButton={ TextButton(onClick={ confirmDamagedTask=false;onClearDamagedAutomatic() },enabled=!state.busy) { Text("清除") } },
+            dismissButton={ TextButton(onClick={ confirmDamagedTask=false }) { Text("取消") } })
+    }
+
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) { data ->
             val container=if(isSystemInDarkTheme()) MaterialTheme.colorScheme.primaryContainer else Color(0xFFE5F2E1)
@@ -279,12 +289,12 @@ fun IbudaoaApp(
                     onReviewRoadDirections = { directionIndex = 0; showRoadDirections = true },
                     onPrepareLocalPreview = onPrepareLocalPreview,
                     onPrepareRunningPlan = onPrepareRunningPlan,
-                    onAutomaticAction = onAutomaticAction,
+                    onAutomaticAction = { if(state.automaticJournalDamaged) confirmDamagedTask=true else onAutomaticAction() },
                     onFinishAutomatic = onFinishAutomatic,
                     onAutomaticComplete = onAutomaticComplete,
                     onArchiveAutomatic = onArchiveConfirmedAutomatic,
                     onDiscardAutomatic = onDiscardUnconfirmedAutomatic,
-                    mapActive = !showWarmup && !showSummary && !confirmClear && !showGapCheck && !showManualGaps && !showRoadDirections && !state.capture.active,
+                    mapActive = !showWarmup && !showSummary && !confirmDamagedTask && !confirmClear && !showGapCheck && !showManualGaps && !showRoadDirections && !state.capture.active,
                 )
                 Destination.SETTINGS -> SettingsPage(
                     state = state,
@@ -721,8 +731,9 @@ internal fun MapPage(
                         }
                     }
                 }
-                val verifying=auto.verification==io.github.ibudaoa.running.AutomaticVerificationState.VERIFYING || auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.STARTING,
-                    io.github.ibudaoa.running.AutomaticRunPhase.FINISHING,io.github.ibudaoa.running.AutomaticRunPhase.AWAITING_VERDICT)
+                state.automaticRecoveryIssue?.let { Text(it,style=MaterialTheme.typography.bodyMedium) }
+                val verifying=state.automaticRecoveryIssue==null && (auto.verification==io.github.ibudaoa.running.AutomaticVerificationState.VERIFYING || auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.STARTING,
+                    io.github.ibudaoa.running.AutomaticRunPhase.FINISHING,io.github.ibudaoa.running.AutomaticRunPhase.AWAITING_VERDICT))
                 val finished=auto.phase in setOf(io.github.ibudaoa.running.AutomaticRunPhase.VALID,io.github.ibudaoa.running.AutomaticRunPhase.INVALID)
                 val finishUnknown=auto.manualConfirmationAvailable
                 if(finishUnknown) {
@@ -754,6 +765,7 @@ internal fun MapPage(
                         }
                     }
                 } else Button(onClick = when {
+                        state.automaticJournalDamaged || state.automaticRecoveryIssue!=null -> onAutomaticAction
                         finished -> onAutomaticComplete
                         verifying -> ({})
                         auto.phase==io.github.ibudaoa.running.AutomaticRunPhase.FAILED && !auto.platformStarted -> onPrepareRunningPlan
@@ -766,6 +778,8 @@ internal fun MapPage(
                     enabled = !state.busy && !verifying && !state.automaticRestoring) {
                     Text(when {
                         state.automaticRestoring -> "正在恢复"
+                        state.automaticJournalDamaged -> "清除损坏的本地任务"
+                        state.automaticRecoveryIssue!=null -> "重试恢复或清理"
                         finished -> "完成"
                         verifying -> "核验中"
                         active -> if(auto.recordBound) "核对本次记录" else "结束本次任务"

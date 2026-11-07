@@ -32,6 +32,27 @@ class AutomaticRunTest {
         assertFalse(h.controller.start())
         assertEquals(AutomaticRunPhase.FAILED,h.controller.summary.phase)
     }
+    @Test fun removalBeforeStartPreventsEveryWrite() = runBlocking {
+        val h=Harness();h.controller.pause()
+        assertFalse(h.controller.start());assertTrue(h.requests.isEmpty())
+        assertEquals(RunRecoveryAction.DISCARD_LOCAL,h.ledger.recoveryAction())
+    }
+    @Test fun removalWhileSelectingZonePreventsRegistrationAfterLateResponse() = runBlocking {
+        val h=Harness()
+        h.during={ if(it==RunEndpoint.ZONE)h.controller.pause() }
+        assertFalse(h.controller.start())
+        assertEquals(listOf(RunEndpoint.ZONE),h.requests)
+        assertNull(h.run.current())
+        assertEquals(RunRecoveryAction.DISCARD_LOCAL,h.ledger.recoveryAction())
+    }
+    @Test fun removalDuringRegistrationDoesNotStartTheTimeline() = runBlocking {
+        val h=Harness()
+        h.during={ if(it==RunEndpoint.REGISTER)h.controller.pause() }
+        assertFalse(h.controller.start())
+        assertEquals(listOf(RunEndpoint.ZONE,RunEndpoint.REGISTER),h.requests)
+        assertNull(h.run.current())
+        assertEquals(RunRecoveryAction.DISCARD_LOCAL,h.ledger.recoveryAction())
+    }
     private val metric=object:PlatformDistance {
         override val implementationId="automatic-flat-test"
         override fun meters(from:CampusCoordinate,to:CampusCoordinate)=kotlin.math.hypot(to.latitude-from.latitude,to.longitude-from.longitude)*100_000
