@@ -1182,6 +1182,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         requestCapture(CapturePurpose.ACCOUNT_SESSION,forceCapture=true)
     }
 
+    fun openCertificateSetup() {
+        if (state.value.busy || state.value.capture.active) return
+        captureFlowActive = true
+        certificateCheckJob?.cancel()
+        val generation = certificateGate.begin()
+        operation("证书未能保存，请重试。") {
+            mutableState.update { it.copy(certificateSetup = CertificateSetupPhase.SAVING) }
+            val file = try {
+                withContext(Dispatchers.IO) { certificateDownloads.ensure(certificates.root().encoded) }
+            } catch (error: CancellationException) { throw error }
+            catch (_: Exception) {
+                if (certificateGate.accepts(generation))
+                    mutableState.update { it.copy(certificateSetup = CertificateSetupPhase.SAVE_FAILED) }
+                return@operation
+            }
+            if (!certificateGate.accepts(generation) || !captureFlowActive) return@operation
+            mutableState.update { it.copy(certificateFileName = file.fileName,
+                certificateSetup = CertificateSetupPhase.WAITING_INSTALL) }
+            if (certificateGate.waiting(generation)) sendCaptureAction(CaptureAction.OPEN_CERTIFICATE_SETTINGS)
+        }
+    }
+
     private fun requestCapture(purpose: CapturePurpose, forceCapture:Boolean=false) {
         if (state.value.busy || purpose!=CapturePurpose.ACCOUNT_SESSION && roadJob != null) return
         if (!state.value.capture.active) requestedCapturePurpose=purpose

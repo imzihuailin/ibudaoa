@@ -101,24 +101,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openCertificateSettings() {
-        val intents = listOf(
-            android.content.Intent().setClassName("com.android.settings", "com.android.settings.SubSettings")
-                .putExtra(":settings:show_fragment", "com.android.settings.security.InstallCertificateFromStorage"),
-            android.content.Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS),
-            android.content.Intent(android.provider.Settings.ACTION_SETTINGS)
-        )
-        for ((index, intent) in intents.withIndex()) {
-            try {
-                startActivity(intent)
-                if (index > 0) model.showMessage("请在设置中搜索‘安装证书’，选择CA证书")
-                return
-            } catch (_: android.content.ActivityNotFoundException) {
-                // Try the next system settings entry.
-            } catch (_: SecurityException) {
-                // Vendor settings may reject external callers.
-            }
+        try {
+            startActivity(android.content.Intent(android.provider.Settings.ACTION_SETTINGS))
+        } catch (_: android.content.ActivityNotFoundException) {
+            model.showMessage("无法打开设置，请手动打开设置并搜索‘CA证书’")
+        } catch (_: SecurityException) {
+            model.showMessage("无法打开设置，请手动打开设置并搜索‘CA证书’")
         }
-        model.showMessage("无法打开设置，请手动在设置中搜索‘安装证书’，选择CA证书")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -171,6 +160,7 @@ class MainActivity : ComponentActivity() {
                             events = model.events,
                             onDiagnosticMode = model::setDiagnosticMode,
                             onAcknowledgePreparation = { model.continuePreparation(lifecycle) },
+                            onCertificateSettings = { model.openCertificateSetup() },
                             onImport = { importConfig.launch(arrayOf("application/json", "text/plain")) },
                             onExport = { exportConfig.launch("ibudaoa-diagnostic.json") },
                             onExportConnectionReport = { exportConnectionReport.launch("ibudaoa-connection-report.json") },

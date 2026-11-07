@@ -147,6 +147,7 @@ fun IbudaoaApp(
     state: AppState,
     events: Flow<String>,
     onAcknowledgePreparation: () -> Unit,
+    onCertificateSettings: () -> Unit,
     onImport: () -> Unit,
     onExport: () -> Unit,
     onExportConnectionReport: () -> Unit,
@@ -408,6 +409,10 @@ fun IbudaoaApp(
             batterySkipped = skippedBattery,
             onSkipBattery = { skippedBattery = true },
             onContinue = {
+                if (needsCertificateSetup(state.certificateSetup, state.capturedConfig, state.certificateTrusted, state.capture.active)) {
+                    onCertificateSettings()
+                    return@WarmupDialog
+                }
                 if (WarmupPolicy.needsLogin(state)) {
                     onReconnect()
                     return@WarmupDialog
@@ -901,6 +906,24 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
     val preparation = rememberRoadPreparation(state)
     val setup = state.certificateSetup
     val certificateStep = needsCertificateSetup(setup, state.capturedConfig, state.certificateTrusted, state.capture.active)
+    val certificateInstructions = certificateStep && setup in setOf(
+        CertificateSetupPhase.IDLE, CertificateSetupPhase.WAITING_INSTALL, CertificateSetupPhase.NOT_INSTALLED)
+    // Keep one deadline for this dialog instance, even while certificate checks change phase.
+    var certificateReadDeadline by remember { mutableStateOf<Long?>(null) }
+    var certificateReadSeconds by remember { mutableStateOf(3) }
+    LaunchedEffect(certificateInstructions) {
+        if (certificateInstructions && certificateReadDeadline == null)
+            certificateReadDeadline = android.os.SystemClock.elapsedRealtime() + 3_000L
+    }
+    LaunchedEffect(certificateReadDeadline) {
+        val deadline = certificateReadDeadline ?: return@LaunchedEffect
+        do {
+            val remaining = (deadline - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+            certificateReadSeconds = ((remaining + 999L) / 1_000L).toInt()
+            if (remaining > 0L) kotlinx.coroutines.delay(minOf(remaining, 100L))
+        } while (remaining > 0L)
+    }
+    val certificateReadLocked = certificateInstructions && certificateReadSeconds > 0
     val capture = state.capture
     val roads = preparation?.report
     val needsCapture = WarmupPolicy.needsLogin(state) || !state.capturedConfig || state.captureRevision != DiagnosticStore.CURRENT_CAPTURE_REVISION
@@ -932,9 +955,9 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
     val button = when {
         certificateStep -> when (setup) {
             CertificateSetupPhase.CHECK_FAILED, CertificateSetupPhase.SAVE_FAILED -> "重试"
-            CertificateSetupPhase.WAITING_INSTALL, CertificateSetupPhase.NOT_INSTALLED -> "去安装"
+            CertificateSetupPhase.WAITING_INSTALL, CertificateSetupPhase.NOT_INSTALLED -> "去设置"
             CertificateSetupPhase.CHECKING, CertificateSetupPhase.SAVING -> "正在准备…"
-            CertificateSetupPhase.IDLE -> "去安装"
+            CertificateSetupPhase.IDLE -> "去设置"
             else -> "开始配置"
         }
         locationStep -> "开启定位"
@@ -947,7 +970,7 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
         capture.phase == CapturePhase.ERROR -> "重试"
         else -> "继续"
     }
-    val enabled = !state.busy && capture.phase !in setOf(CapturePhase.STARTING, CapturePhase.FINALIZING) &&
+    val enabled = !certificateReadLocked && !state.busy && capture.phase !in setOf(CapturePhase.STARTING, CapturePhase.FINALIZING) &&
         setup !in setOf(CertificateSetupPhase.CHECKING, CertificateSetupPhase.SAVING) &&
         (!roadStep || preparation != null && (ready || failed))
     val content: @Composable () -> Unit = {
@@ -971,9 +994,9 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
                     Spacer(Modifier.height(28.dp))
                     HorizontalDivider()
                     Spacer(Modifier.height(28.dp))
-                    if (certificateStep && setup in setOf(CertificateSetupPhase.IDLE, CertificateSetupPhase.WAITING_INSTALL, CertificateSetupPhase.NOT_INSTALLED)) {
+                    if (certificateInstructions) {
                         val name = state.certificateFileName ?: "ibudaoa-连接证书.cer.crt"
-                        Text("1.选择CA证书\n\n2.授权安装\n\n3.在Download文件夹找到\"ibudaoa-连接证书\"并安装",
+                        Text("1.在设置里搜索“CA证书”\n\n2.授权安装\n\n3.在Downloads文件夹里选择ibudaoa安装证书并安装",
                             style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                         if (name != "ibudaoa-连接证书.cer.crt") Text("实际文件名：$name")
                     } else if (!certificateStep && capture.phase != CapturePhase.ERROR &&
@@ -1013,7 +1036,8 @@ internal fun WarmupDialog(state: AppState, onContinue: () -> Unit, onDismiss: ()
                     }
                 } else Button(onClick = onContinue, enabled = enabled,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp), shape = RoundedCornerShape(28.dp)) {
-                    Text(button, style = MaterialTheme.typography.titleLarge)
+                    Text(if (certificateReadLocked) "去设置($certificateReadSeconds)" else button,
+                        style = MaterialTheme.typography.titleLarge)
                 }
             }
         }
