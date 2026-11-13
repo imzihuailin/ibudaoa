@@ -8,8 +8,6 @@ import java.security.cert.X509Certificate;
 import java.util.*;
 import java.util.regex.*;
 import java.util.zip.*;
-import javax.swing.*;
-import java.awt.Desktop;
 import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilderFactory;
 import org.w3c.dom.*;
@@ -61,7 +59,22 @@ public class OneClick {
         return value;
     }
 
-    void step(int n, String message) { stage = message; System.out.println("\n[" + n + "/5] " + message); }
+    void step(int n, String message) throws IOException { stage = message; if (gui) wizard("STATUS", message); System.out.println("\n[" + n + "/5] " + message); }
+
+    // One authenticated localhost connection per request keeps secrets out of arguments and logs.
+    String wizard(String action, String value) throws IOException {
+        String port = requireEnv("IBUDAOA_WIZARD_PORT"), token = requireEnv("IBUDAOA_WIZARD_TOKEN");
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), Integer.parseInt(port)), 10000);
+            BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8));
+            BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+            writer.write(token + "|" + action + "|" + Base64.getEncoder().encodeToString(value.getBytes(StandardCharsets.UTF_8)) + "\n"); writer.flush();
+            String reply = reader.readLine();
+            if (reply == null || !reply.startsWith("OK|")) throw new IOException("安装向导连接已关闭");
+            try { return new String(Base64.getDecoder().decode(reply.substring(3)), StandardCharsets.UTF_8); }
+            catch (IllegalArgumentException e) { throw new IOException("安装向导响应无效", e); }
+        } catch (NumberFormatException e) { throw new IOException("安装向导连接无效", e); }
+    }
 
     static void noLinks(Path path) throws IOException {
         for (Path p = path.toAbsolutePath(); p != null; p = p.getParent())
@@ -223,7 +236,7 @@ public class OneClick {
         if (log != null) builder.redirectOutput(ProcessBuilder.Redirect.PIPE).redirectErrorStream(true);
         Map<String, String> env = builder.environment();
         // Do not inherit user hooks that redirect caches or inject arguments/credentials into Gradle.
-        for (String key : List.of("GRADLE_OPTS", "JAVA_OPTS", "JDK_JAVA_OPTIONS", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS")) env.remove(key);
+        for (String key : List.of("GRADLE_OPTS", "JAVA_OPTS", "JDK_JAVA_OPTIONS", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "IBUDAOA_WIZARD_TOKEN", "IBUDAOA_WIZARD_PORT")) env.remove(key);
         env.put("JAVA_HOME", javaHome.toString());
         String path = javaHome.resolve("bin") + File.pathSeparator + env.getOrDefault("PATH", "");
         if (WINDOWS) {
@@ -474,11 +487,7 @@ public class OneClick {
     }
 
     void confirmSdkLicenses() throws IOException {
-        if (gui) {
-            int answer = JOptionPane.showConfirmDialog(null, "安装需要 Android SDK。请先阅读许可：\nhttps://developer.android.com/studio/terms\n\n是否同意安装所需的 SDK 许可？", "Android SDK 许可", JOptionPane.YES_NO_OPTION);
-            if (answer != JOptionPane.YES_OPTION) throw new IOException("未同意 Android SDK 许可，已停止安装");
-            return;
-        }
+        if (gui) { if (!wizard("LICENSE", "").equals("yes")) throw new IOException("未同意 Android SDK 许可，已停止安装"); return; }
         System.out.println("Android SDK 许可：https://developer.android.com/studio/terms\n"
                 + "本次同意涵盖安装所需的 Android SDK 许可，后续逐项询问由程序自动确认。");
         System.out.print("是否同意本次安装所需的 Android SDK 许可？[y/N]：");
@@ -499,14 +508,7 @@ public class OneClick {
 
     void confirmMapBinding() throws IOException {
         String url = "https://console.amap.com/dev/key/app";
-        if (gui) {
-            JTextArea details = new JTextArea("请在高德控制台为 Android Key 绑定以下信息：\nhttps://console.amap.com/dev/key/app\n\n包名：io.github.ibudaoa\nSHA-1：" + signingSha + "\n\n完成绑定后点击确定。");
-            details.setEditable(false); details.setLineWrap(true); details.setWrapStyleWord(true); details.setOpaque(false);
-            try { if (Desktop.isDesktopSupported()) Desktop.getDesktop().browse(URI.create(url)); } catch (Exception ignored) { }
-            int answer = JOptionPane.showConfirmDialog(null, details, "绑定高德 Key", JOptionPane.OK_CANCEL_OPTION);
-            if (answer != JOptionPane.OK_OPTION) throw new IOException("绑定确认已取消");
-            return;
-        }
+        if (gui) { if (!wizard("BIND", signingSha).equals("continue")) throw new IOException("绑定确认已取消"); return; }
         System.out.println("\n请打开高德控制台，将以上 SHA-1 填入所用 Android Key 的“发布版安全码 SHA1”，"
                 + "并确认包名与上方一致。\n" + terminalLink(url, url));
         System.out.print("确认已完成绑定后，按回车继续：");
@@ -514,13 +516,7 @@ public class OneClick {
     }
 
     String readMaskedKey(String prompt) throws Exception {
-        if (gui) {
-            JPasswordField field = new JPasswordField(32);
-            int answer = JOptionPane.showConfirmDialog(null, new Object[]{prompt, field}, "高德 Android SDK Key", JOptionPane.OK_CANCEL_OPTION);
-            if (answer != JOptionPane.OK_OPTION) throw new IOException("Key 输入已取消");
-            char[] chars = field.getPassword();
-            try { return new String(chars); } finally { Arrays.fill(chars, '\0'); }
-        }
+        if (gui) return wizard("KEY", prompt);
         if (System.console() == null) throw new IOException("请在交互式终端执行命令，以便显示星号输入 Key");
         String[] command;
         if (WINDOWS) {
@@ -582,7 +578,7 @@ public class OneClick {
             String prompt = old.matches("[a-fA-F0-9]{32}") ? "输入新 Key，或直接回车复用：" : "请输入高德 Android Key：";
             String value = readMaskedKey(prompt).trim();
             if (value.isEmpty()) value = old;
-            if (!value.matches("[a-fA-F0-9]{32}")) { if (gui) JOptionPane.showMessageDialog(null, "Key 应为 32 位十六进制字符，请重新输入。"); System.out.println("Key 格式不正确，应为 32 位十六进制字符。请重新输入。"); continue; }
+            if (!value.matches("[a-fA-F0-9]{32}")) { System.out.println("Key 格式不正确，应为 32 位十六进制字符。请重新输入。"); continue; }
             atomicWrite(saved, value.getBytes(StandardCharsets.UTF_8));
             System.out.println("✓ Key 已保存"); return value;
         }
@@ -665,10 +661,7 @@ public class OneClick {
         Path result = target.resolve("ibudaoa.apk");
         atomicWrite(result, Files.readAllBytes(apk));
         atomicWrite(config.resolve("output.sha256"), digest(result, "SHA-256").getBytes(StandardCharsets.UTF_8));
-        if (gui) {
-            int answer = JOptionPane.showConfirmDialog(null, "APK 已生成：\n" + result + "\n\n将 APK 传到手机安装。是否打开文件夹？", "构建完成", JOptionPane.YES_NO_OPTION);
-            if (answer == JOptionPane.YES_OPTION) try { Desktop.getDesktop().open(target.toFile()); } catch (Exception ignored) { JOptionPane.showMessageDialog(null, "无法打开文件夹，请手动打开：\n" + target); }
-        }
+        if (gui) wizard("DONE", result.toString());
         System.out.println("\n构建完成\n\n输出文件夹：" + terminalLink(target)
                 + "\nAPK 文件名：ibudaoa.apk\n\n将 APK 传到手机安装即可。");
     }

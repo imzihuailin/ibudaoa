@@ -527,10 +527,12 @@ try {
     New-Item -ItemType Directory -Path $scratch | Out-Null
     Write-Host 'ibudaoa 一键工具'
     $stage = '下载最新源码'
+    if ($env:IBUDAOA_GUI -eq '1') { Write-Host 'IBUDAOA_STATUS:SOURCE' }
     Write-Host '[1/5] 下载最新源码'
     $revision = Get-SourceSnapshot
     $source = Join-Path $cache 'work/ibudaoa-main'
     $stage = '准备 Java 17'
+    if ($env:IBUDAOA_GUI -eq '1') { Write-Host 'IBUDAOA_STATUS:ENVIRONMENT' }
     $java = $null
     if ($env:JAVA_HOME) {
         $candidate = Join-Path $env:JAVA_HOME 'bin\java.exe'
@@ -566,7 +568,7 @@ try {
     $engine = Join-Path $cache 'OneClick.java'
     Assert-NoLink $engine
     Copy-Item -LiteralPath (Join-Path $source 'scripts/OneClick.java') -Destination $engine -Force
-    if ($env:IBUDAOA_GUI -eq '1' -and !([IO.File]::ReadAllText($engine).Contains('IBUDAOA_GUI'))) { throw '当前源码版本不支持图形向导，请更新源码后重试。' }
+    if ($env:IBUDAOA_GUI -eq '1' -and !([IO.File]::ReadAllText($engine).Contains('IBUDAOA_WIZARD_PORT'))) { throw '当前源码版本不支持图形向导，请更新源码后重试。' }
     & $java '-Dfile.encoding=UTF-8' $engine build $revision $cache
     if ($LASTEXITCODE -ne 0) { throw "操作未完成，返回码：$LASTEXITCODE" }
 
