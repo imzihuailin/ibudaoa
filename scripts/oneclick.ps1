@@ -566,6 +566,7 @@ try {
     $engine = Join-Path $cache 'OneClick.java'
     Assert-NoLink $engine
     Copy-Item -LiteralPath (Join-Path $source 'scripts/OneClick.java') -Destination $engine -Force
+    if ($env:IBUDAOA_GUI -eq '1' -and !([IO.File]::ReadAllText($engine).Contains('IBUDAOA_GUI'))) { throw '当前源码版本不支持图形向导，请更新源码后重试。' }
     & $java '-Dfile.encoding=UTF-8' $engine build $revision $cache
     if ($LASTEXITCODE -ne 0) { throw "操作未完成，返回码：$LASTEXITCODE" }
 
