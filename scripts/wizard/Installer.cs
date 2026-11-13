@@ -16,6 +16,12 @@ internal sealed class Installer : Form {
     readonly Label title = new Label(), description = new Label(), error = new Label();
     readonly TextBox key = new TextBox(), package = new TextBox(), sha = new TextBox();
     readonly Button primary = new Button(), secondary = new Button(), link = new Button(), copyPackage = new Button(), copySha = new Button();
+    readonly Panel bindGuide = new Panel(), keyGuide = new Panel();
+    readonly Button bindLink = new Button(), bindScreenshots = new Button(), keyScreenshots = new Button();
+    readonly ProgressBar progress = new ProgressBar();
+    readonly Label bindDescription = new Label(), packageLabel = new Label(), shaLabel = new Label(), screenshotsLabel = new Label();
+    readonly PictureBox[] bindImages = { new PictureBox(), new PictureBox(), new PictureBox() };
+    readonly PictureBox keyImage = new PictureBox();
     Process worker;
     TcpListener listener;
     StreamWriter pending;
@@ -26,25 +32,60 @@ internal sealed class Installer : Form {
         Text = "ibudaoa 安装向导"; ClientSize = new Size(720, 470); MinimumSize = MaximumSize = Size;
         StartPosition = FormStartPosition.CenterScreen; Font = new Font("Microsoft YaHei UI", 10F);
         title.SetBounds(30, 24, 655, 40); title.Font = new Font(Font.FontFamily, 16F, FontStyle.Bold);
-        description.SetBounds(30, 80, 650, 105);
-        key.SetBounds(30, 208, 600, 30); key.MaxLength = 32;
-        package.SetBounds(30, 212, 490, 30); package.ReadOnly = true; package.Text = "io.github.ibudaoa";
-        sha.SetBounds(30, 258, 490, 30); sha.ReadOnly = true;
-        copyPackage.SetBounds(535, 208, 110, 32); copyPackage.Text = "复制包名";
-        copySha.SetBounds(535, 254, 110, 32); copySha.Text = "复制 SHA-1";
+        description.SetBounds(30, 80, 650, 65);
+        key.SetBounds(30, 155, 600, 30); key.MaxLength = 32;
+        package.SetBounds(0, 164, 475, 30); package.ReadOnly = true; package.Text = "io.github.ibudaoa";
+        sha.SetBounds(0, 220, 475, 30); sha.ReadOnly = true;
+        copyPackage.SetBounds(490, 161, 100, 32); copyPackage.Text = "复制";
+        copySha.SetBounds(490, 217, 100, 32); copySha.Text = "复制";
         link.SetBounds(30, 310, 180, 34);
-        error.SetBounds(30, 350, 650, 32); error.ForeColor = Color.Firebrick;
-        primary.SetBounds(550, 405, 130, 36); secondary.SetBounds(400, 405, 130, 36);
-        Controls.AddRange(new Control[] { title, description, key, package, sha, copyPackage, copySha, link, error, primary, secondary });
+        error.SetBounds(30, 380, 650, 25); error.ForeColor = Color.Firebrick;
+        primary.SetBounds(550, 420, 130, 36); secondary.SetBounds(350, 420, 180, 36);
+        progress.SetBounds(30, 210, 630, 24); progress.Style = ProgressBarStyle.Marquee; progress.MarqueeAnimationSpeed = 30;
+        bindGuide.SetBounds(30, 80, 650, 315); bindGuide.AutoScroll = true;
+        bindDescription.SetBounds(0, 0, 610, 115);
+        bindDescription.Text = "1. 打开高德控制台并登录。\r\n2. 创建新应用。\r\n3. 点击添加 Key，选择 Android 平台。\r\n4. 填写下方信息，完成创建。";
+        packageLabel.SetBounds(0, 140, 400, 22); packageLabel.Text = "PackageName";
+        shaLabel.SetBounds(0, 196, 400, 22); shaLabel.Text = "发布版安全码SHA1";
+        bindLink.SetBounds(0, 261, 180, 34); bindLink.Text = "打开高德控制台";
+        bindScreenshots.SetBounds(200, 261, 180, 34); bindScreenshots.Text = "查看截图示意";
+        screenshotsLabel.SetBounds(0, 310, 300, 28); screenshotsLabel.Text = "截图示意";
+        bindGuide.Controls.AddRange(new Control[] { bindDescription, packageLabel, shaLabel, package, sha, copyPackage, copySha, bindLink, bindScreenshots, screenshotsLabel });
+        string[] names = { "create-app.png", "add-key.png", "configure-key.png" };
+        for (int i = 0; i < bindImages.Length; i++) {
+            bindImages[i].SetBounds(0, 342 + i * 378, 610, 368); bindImages[i].SizeMode = PictureBoxSizeMode.Zoom;
+            bindImages[i].Image = LoadImage(names[i]); bindGuide.Controls.Add(bindImages[i]);
+        }
+        keyScreenshots.SetBounds(30, 198, 180, 34); keyScreenshots.Text = "查看截图示意";
+        keyGuide.SetBounds(30, 238, 650, 137); keyGuide.AutoScroll = true;
+        keyImage.SetBounds(0, 0, 610, 368); keyImage.SizeMode = PictureBoxSizeMode.Zoom; keyImage.Image = LoadImage("copy-key.png");
+        keyGuide.Controls.Add(keyImage);
+        Controls.AddRange(new Control[] { title, description, key, link, error, primary, secondary, progress, bindGuide, keyScreenshots, keyGuide });
+        bindLink.Click += delegate { OpenLink(); };
+        bindScreenshots.Click += delegate { ToggleBindScreenshots(); };
+        keyScreenshots.Click += delegate { keyGuide.Visible = !keyGuide.Visible; keyScreenshots.Text = keyGuide.Visible ? "收起截图示意" : "查看截图示意"; };
         copyPackage.Click += delegate { CopyText(package.Text); }; copySha.Click += delegate { CopyText(sha.Text); };
         link.Click += delegate { OpenLink(); }; primary.Click += delegate { Primary(); }; secondary.Click += delegate { Secondary(); };
         Shown += delegate { StartWork(); }; FormClosing += OnClosing;
     }
     void Page(string name, string heading, string body) {
         current = name; title.Text = heading; description.Text = body; error.Text = "";
-        foreach (Control c in new Control[] {key, package, sha, copyPackage, copySha, link, primary, secondary}) c.Visible = false;
+        foreach (Control c in new Control[] {key, link, primary, secondary, progress, bindGuide, keyScreenshots, keyGuide}) c.Visible = false;
+        progress.MarqueeAnimationSpeed = 0; description.Visible = true;
     }
-    void Progress(string message) { phase = message; Page("progress", message, "请保持窗口打开。首次使用可能需要几分钟。"); }
+    void Progress(string message) { phase = message; Page("progress", message, "请保持窗口打开。首次使用可能需要几分钟。"); progress.MarqueeAnimationSpeed = 30; progress.Visible = true; }
+    static Image LoadImage(string name) {
+        using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("wizard." + name)) {
+            if (stream == null) throw new InvalidOperationException("缺少截图资源：" + name);
+            using (Image image = Image.FromStream(stream)) return new Bitmap(image);
+        }
+    }
+    void ToggleBindScreenshots() {
+        bool show = !screenshotsLabel.Visible;
+        screenshotsLabel.Visible = show; foreach (PictureBox image in bindImages) image.Visible = show;
+        bindScreenshots.Text = show ? "收起截图示意" : "查看截图示意";
+        bindGuide.AutoScrollMinSize = new Size(0, show ? 1490 : 300);
+    }
     static string Enc(string s) { return Convert.ToBase64String(Encoding.UTF8.GetBytes(s)); }
     static string Dec(string s) { return Encoding.UTF8.GetString(Convert.FromBase64String(s)); }
     static string NewToken() { byte[] bytes = new byte[32]; using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(bytes); return BitConverter.ToString(bytes).Replace("-", ""); }
@@ -107,13 +148,16 @@ internal sealed class Installer : Form {
         secondary.Visible = true; secondary.Text = "不同意";
     }
     void BindPage(string value) {
-        Page("bind", "配置高德 Android Key", "1. 打开高德控制台并登录。\r\n2. 创建 Android 平台的 Key。\r\n3. 将下面的包名和 SHA-1 填入对应位置，完成创建。");
-        package.Visible = sha.Visible = copyPackage.Visible = copySha.Visible = link.Visible = primary.Visible = true;
-        sha.Text = value; link.Text = "打开高德控制台"; primary.Text = "继续";
+        Page("bind", "配置高德 Android Key", "");
+        description.Visible = false; bindGuide.Visible = true;
+        bindGuide.AutoScrollPosition = new Point(0, 0); screenshotsLabel.Visible = false;
+        foreach (PictureBox image in bindImages) image.Visible = false;
+        bindScreenshots.Text = "查看截图示意"; bindGuide.AutoScrollMinSize = new Size(0, 300);
+        sha.Text = value; primary.Visible = true; primary.Text = "继续";
     }
     void KeyPage(bool saved) {
         reuse = saved; Page("key", "输入高德 Android SDK Key", saved ? "可以使用已保存的 Key，或在下方输入新的 32 位 Key。" : "粘贴刚才创建的 32 位 Android SDK Key。");
-        key.Text = ""; key.Visible = primary.Visible = true; primary.Text = saved ? "使用新 Key" : "继续";
+        key.Text = ""; keyScreenshots.Text = "查看截图示意"; keyScreenshots.Visible = true; key.Visible = primary.Visible = true; primary.Text = saved ? "使用新 Key" : "继续";
         secondary.Visible = saved; secondary.Text = "使用已保存的 Key"; key.Focus();
     }
     void Primary() {
