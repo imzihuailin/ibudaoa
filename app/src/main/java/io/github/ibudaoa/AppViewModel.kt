@@ -1710,8 +1710,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val client=io.github.ibudaoa.updates.ReleaseUpdateClient();updateClient=client
             mutableState.update { it.copy(updateCheck=io.github.ibudaoa.updates.UpdateSummary(io.github.ibudaoa.updates.UpdatePhase.CHECKING)) }
             try {
-                val result=withContext(Dispatchers.IO) { client.check(repository,io.github.ibudaoa.BuildConfig.VERSION_NAME) }
-                if(accountForeground)mutableState.update { it.copy(updateCheck=result) }
+                val result=withContext(Dispatchers.IO) { client.check(repository,io.github.ibudaoa.BuildConfig.VERSION_CODE) }
+                if(accountForeground) {
+                    mutableState.update { it.copy(updateCheck=result) }
+                    if(result.phase!=io.github.ibudaoa.updates.UpdatePhase.AVAILABLE)showMessage(result.label)
+                }
             } catch(e:CancellationException) {
                 mutableState.update { it.copy(updateCheck=io.github.ibudaoa.updates.UpdateSummary(io.github.ibudaoa.updates.UpdatePhase.INTERRUPTED)) }
                 throw e

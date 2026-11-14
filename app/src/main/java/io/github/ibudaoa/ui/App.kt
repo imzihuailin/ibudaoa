@@ -875,11 +875,15 @@ internal fun SettingsPage(state: AppState, onExit: () -> Unit, onConnect: () -> 
             if(repository!=null)openPage(repository.url) else onMessage("项目仓库尚未配置，当前没有可打开的仓库链接。")
         }
         val update=state.updateCheck
-        ToolCard("检查更新", "当前版本 ${BuildConfig.VERSION_NAME} · ${update.label}", Icons.Default.Refresh, Icons.AutoMirrored.Filled.OpenInNew,
-            enabled = !state.automaticRun.blocksExternalUi) {
-            val page=update.releaseUrl
-            if(page!=null && update.phase in setOf(io.github.ibudaoa.updates.UpdatePhase.AVAILABLE,io.github.ibudaoa.updates.UpdatePhase.UNSUPPORTED))openPage(page)
-            else onCheckUpdates()
+        var showUpdate by rememberSaveable { mutableStateOf(false) }
+        LaunchedEffect(update) { showUpdate=update.phase==io.github.ibudaoa.updates.UpdatePhase.AVAILABLE }
+        if(showUpdate)AlertDialog(onDismissRequest={ showUpdate=false },
+            title={ Text("发现新版本") },
+            text={ Text("发现新版本 ${update.version}，当前版本 ${BuildConfig.VERSION_NAME}。请在电脑上重新运行安装向导，编译并安装新版。") },
+            confirmButton={ TextButton(onClick={ showUpdate=false }) { Text("知道了") } })
+        ToolCard("检查更新", "当前版本 ${BuildConfig.VERSION_NAME} · ${update.label}", Icons.Default.Refresh, Icons.Default.Refresh,
+            enabled = !state.automaticRun.blocksExternalUi && update.phase!=io.github.ibudaoa.updates.UpdatePhase.CHECKING) {
+            onCheckUpdates()
         }
     }
 }

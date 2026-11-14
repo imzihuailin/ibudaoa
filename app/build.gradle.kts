@@ -15,7 +15,7 @@ require(localMapKey.isEmpty() || localMapKey.matches(Regex("[a-fA-F0-9]{32}"))) 
     "Invalid local Android map key format"
 }
 
-val localRepositoryUrl = localMapProperties.getProperty("project.repository.url", "").trim().removeSuffix("/").removeSuffix(".git")
+val localRepositoryUrl = localMapProperties.getProperty("project.repository.url", "https://github.com/imzihuailin/ibudaoa").trim().removeSuffix("/").removeSuffix(".git")
 require(localRepositoryUrl.isEmpty() || localRepositoryUrl.matches(Regex("https://github\\.com/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}"))) {
     "project.repository.url must be a public HTTPS GitHub repository URL"
 }
@@ -28,8 +28,8 @@ android {
         applicationId = "io.github.ibudaoa"
         minSdk = 29
         targetSdk = 36
-        versionCode = 99
-        versionName = "1.0.1"
+        versionCode = 100
+        versionName = "1.0.2"
         manifestPlaceholders["amapAndroidKey"] = localMapKey
         buildConfigField("boolean", "MAP_KEY_CONFIGURED", localMapKey.isNotEmpty().toString())
         buildConfigField("String", "REPOSITORY_URL", "\"$localRepositoryUrl\"")
