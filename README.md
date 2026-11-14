@@ -4,21 +4,17 @@
 
 ## 安装
 
-- 使用下方一键命令生成 APK 后安装。
+- 下载安装向导，根据向导引导制作 APK 安装包
 
-## 安装前准备
-### 注册高德开发者平台账号
->[高德开发者平台](https://console.amap.com/dev/key/app)
+## 终端安装命令
 
-## 安装命令
-
-**Windows：打开 PowerShell，粘贴整行命令并回车执行**
+**Windows**
 
 ```powershell
 & { $p = Join-Path ([IO.Path]::GetTempPath()) ('ibudaoa-' + [guid]::NewGuid() + '.ps1'); $u = 'https://raw.githubusercontent.com/imzihuailin/ibudaoa/HEAD/scripts/oneclick.ps1'; $ok = $false; try { foreach ($prefix in @('https://ghfast.top/', 'https://gh-proxy.org/', '')) { try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 ($prefix + $u) -OutFile $p -ErrorAction Stop; $text = [IO.File]::ReadAllText($p); if ($text -notmatch '^\s*param\(' -or !$text.Contains('ibudaoa-oneclick-v1')) { throw '入口内容无效' }; $ok = $true; break } catch { Write-Host '当前入口不可用，尝试下一个来源。' } }; if (!$ok) { throw '所有入口下载来源均失败。' }; powershell -NoProfile -ExecutionPolicy Bypass -File $p build } finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue } }
 ```
 
-**Linux：打开终端，粘贴整行命令。**
+**Linux**
 
 ```sh
 bash -c 'set -e; p=$(mktemp); trap '\''rm -f "$p"'\'' EXIT; u=https://raw.githubusercontent.com/imzihuailin/ibudaoa/HEAD/scripts/oneclick.sh; ok=false; for prefix in https://ghfast.top/ https://gh-proxy.org/ ""; do if curl -fL --retry 1 --connect-timeout 15 --max-time 60 "$prefix$u" -o "$p" && [ "$(head -n 1 "$p")" = "#!/usr/bin/env bash" ] && grep -q ibudaoa-oneclick-v1 "$p"; then ok=true; break; fi; done; [ "$ok" = true ] || { echo 所有入口下载来源均失败 >&2; exit 1; }; bash "$p" build'
