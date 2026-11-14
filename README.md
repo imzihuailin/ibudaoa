@@ -2,12 +2,19 @@
 
 一个自动生成校园跑记录的 APP （目前只支持武汉工程大学流芳校区）
 
-截图
+<table>
+  <tr>
+    <td width="33%"><img src="pics/readme-running-ready.jpg" width="100%" alt="跑步页：生成运行计划" /></td>
+    <td width="33%"><img src="pics/readme-running-active.jpg" width="100%" alt="跑步页：运行中的路线与进度" /></td>
+    <td width="33%"><img src="pics/readme-settings.jpg" width="100%" alt="设置页：账号与检查更新" /></td>
+  </tr>
+</table>
 
 ## 安装
 
 - 下载安装向导，根据向导引导制作 APK 安装包
-向导下载链接
+
+[下载安装向导（Windows .exe）](https://github.com/imzihuailin/ibudaoa/releases/download/installer-v1/ibudaoa-setup.exe)
 
 ## 终端安装命令
 

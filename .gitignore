@@ -71,3 +71,10 @@ __pycache__/
 *.py[cod]
 .venv/
 node_modules/
+
+# Public README screenshots only; other local mockups stay private.
+!/pics/
+/pics/*
+!/pics/readme-running-ready.jpg
+!/pics/readme-running-active.jpg
+!/pics/readme-settings.jpg
